@@ -10,11 +10,12 @@ Maya 用 Python ツールを**自宅（Maya 無し）で開発し、GitHub 経�
   - コードは **Python 3.10 で動く構文**に留める（2024=3.10 / 2025=3.11。`match` 文は
     3.10 から使えるが、下限が下がったときに壊れるので避ける。型注釈を書くなら
     `from __future__ import annotations` を付ける）
-  - **UI は `maya.cmds` で書く。PySide は使わない。** 2024 は PySide2、2025 は
+  - **新規ツールの UI は `maya.cmds` で書く。** 2024 は PySide2、2025 は
     PySide6 で **import 名から互換が無く**、両対応するには shim が要る。
     `cmds` なら 1 本のコードがそのまま両方で動く
-  - Qt がどうしても必要になったら、その時点でユーザーに相談する（対応方針を
-    決めずに `PySide2` を書き始めると 2025 で落ちる）
+  - **既に PySide で書かれているツールは PySide のまま両対応にする**
+    （2026-08-16 決定）。`cmds` へ書き直すとレイアウトが崩れるため。
+    下の「PySide2/6 両対応 shim」に従う
   - バージョン早見: Maya 2022=3.7 / 2023=3.9 / 2024=3.10 / 2025・2026=3.11
   - **対応バージョンを変えるときは 3 箇所を直す**: この行 /
     `tools/check_tools.py` の `TARGET_PYTHON` / 雛形の `tests/test_tool_meta.py` の
@@ -53,8 +54,40 @@ Maya 用 Python ツールを**自宅（Maya 無し）で開発し、GitHub 経�
 
 **そのうち 3 本（`ConstrainInspector` / `MgearToDWpicker` / `toon_outline_manager`）は
 `PySide2` + `shiboken2` を直接 import しており、Maya 2025 では import に失敗する。**
-標準セット化のついでに直すなら、`cmds` で書き直すか PySide2/6 の両対応 shim を
-入れることになる（どちらを選ぶかはユーザーに確認する）。
+**この 3 本は `cmds` へ書き直さず、PySide のまま両対応にする**（2026-08-16 決定。
+既にあるレイアウトを崩したくないため）。手順は下の「PySide2/6 両対応 shim」。
+
+### PySide2/6 両対応 shim
+
+既存の PySide ツールを Maya 2025 でも動かすときの型。**パッケージ内に
+`qt.py` を 1 枚置き、他のモジュールはそこからだけ import する**
+（各ファイルに try/except を散らすと、必ずどこかが漏れて 2025 で落ちる）。
+
+```python
+# <pkg>/qt.py
+try:                                              # Maya 2025+
+    from PySide6 import QtCore, QtGui, QtWidgets
+    from shiboken6 import wrapInstance
+except ImportError:                               # Maya 2024
+    from PySide2 import QtCore, QtGui, QtWidgets
+    from shiboken2 import wrapInstance
+```
+
+Qt5 → Qt6 で実際にぶつかる差（import 名だけ直しても落ちる箇所）:
+
+- **`QAction` / `QActionGroup` が `QtWidgets` から `QtGui` へ移った。**
+  `QtWidgets.QAction` は 2025 で `AttributeError`
+- `exec_()` → `exec()`（Qt5 側にも `exec()` があるので `exec()` に寄せる）
+- `QRegExp` 廃止 → `QtCore.QRegularExpression`
+- `QDesktopWidget` 廃止 → `QtGui.QGuiApplication.primaryScreen().geometry()`
+- `.setMargin()` 廃止 → `.setContentsMargins()`
+- enum は Qt6 でスコープ必須の箇所がある（`Qt.AlignLeft` → `Qt.AlignmentFlag.AlignLeft`）。
+  Qt5 でも後者が通るので、迷ったら長い方で書く
+
+**自宅では PySide が無いので import すら確かめられない。** テストは
+`tests/_bootstrap.py` のスタブに PySide を足すか、Qt を触るコードを
+`core.py` 側へ寄せて回避する。実機確認は 2024 と 2025 の**両方**で行う
+（片方だけ通しても意味が無いのがこの作業の目的）。
 
 ### 新規ツール
 

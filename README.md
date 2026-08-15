@@ -4,7 +4,7 @@
 
 | ツール | カテゴリ | バージョン | 対応Maya | 起動方法 | 機能概要 |
 |---|---|---|---|---|---|
-| _(まだ 1 本も無い)_ | | | | | |
+| [unload_reference_delete](unload_reference_delete/) | Reference | 0.1.0 | 2024+ | シェルフ `UnldRefDel` | アンロード中のリファレンスを一覧してまとめて削除（**実機未確認**） |
 
 各ツールは `install.py` を **Maya のビューポートにドラッグ&ドロップ**するだけで
 インストールでき、以降は Maya を再起動せずに **UI の「GitHub から更新」ボタン**
@@ -23,7 +23,6 @@
 | [PlayblastTool](PlayblastTool/) | `playblast_tool.py` | — | `cmds` のみ |
 | [SelectedReferenceDelete](SelectedReferenceDelete/) | `SelectedReferenceDelete.py` | — | `cmds` のみ |
 | [TimewarpHUD](TimewarpHUD/) | `scene_timewarp_hud.py` | — | `cmds` のみ |
-| [UnloadReferenceDelete](UnloadReferenceDelete/) | `unloadReferenceDelete.py` | — | `cmds` のみ |
 | [toon_outline_manager](toon_outline_manager/) | `toon_outline_manager.py` | PySide2 | **Maya 2025 では動かない**（要 PySide6 対応） |
 
 ## 更新方法（ドキュメント）
