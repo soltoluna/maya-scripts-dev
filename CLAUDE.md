@@ -19,7 +19,10 @@ Maya 用 Python ツールを**自宅（Maya 無し）で開発し、GitHub 経�
   - **対応バージョンを変えるときは 3 箇所を直す**: この行 /
     `tools/check_tools.py` の `TARGET_PYTHON` / 雛形の `tests/test_tool_meta.py` の
     `_TARGET_PYTHON`
-- 開発機（自宅）: **Maya は入っていない。** テストは Maya スタブで回す（`tests/`）
+- 開発機（自宅）: **Maya は使えない。** テストは Maya スタブで回す（`tests/`）
+  - `C:\Program Files\Autodesk\Maya2025` は**存在するがライセンスが切れている**。
+    `mayapy.exe` が起動することを確認しても**使えないので提案しないこと**
+    （2026-08-15 に一度この勘違いをした）。 実機確認は会社の Maya のみ
 - 実機（会社）: Maya 2024 / 2025。 **実機確認はここでしかできない**
 - ワークスペース: `D:\maya\scripts\dev`
 - GitHub: `soltoluna/maya-scripts-dev`（**public モノレポ**。 ツール 1 本 = フォルダ 1 つ）
@@ -39,6 +42,20 @@ Maya 用 Python ツールを**自宅（Maya 無し）で開発し、GitHub 経�
 `docs/PROGRESS.md` の「次回」に実機確認を残す。
 
 ## フォルダ構造
+
+### 既存スクリプト（`ntk_` が付かないフォルダ）
+
+`ConstrainInspector` / `PlayblastTool` / `toon_outline_manager` などは、
+標準セット化する前から使っている**単体スクリプト**。 `install.py` もテストも
+無く、`tools/check_tools.py` の対象外（`ntk_*` だけを見る）。 手を入れるときは
+`/scaffold` で標準セットに載せてから触る。
+
+**そのうち 3 本（`ConstrainInspector` / `MgearToDWpicker` / `toon_outline_manager`）は
+`PySide2` + `shiboken2` を直接 import しており、Maya 2025 では import に失敗する。**
+標準セット化のついでに直すなら、`cmds` で書き直すか PySide2/6 の両対応 shim を
+入れることになる（どちらを選ぶかはユーザーに確認する）。
+
+### 新規ツール
 
 ツール 1 本が 1 フォルダ。 **中に同名のパッケージを持つ**（`install.py` をパッケージの
 外に置くため。 `install.py` は単体で GitHub から fetch されて `exec` されるので、

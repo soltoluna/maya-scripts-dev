@@ -10,6 +10,22 @@
 インストールでき、以降は Maya を再起動せずに **UI の「GitHub から更新」ボタン**
 （またはシェルフボタンの右クリック）で最新版に更新できる。
 
+## 既存スクリプト（標準セット化前）
+
+以前から使っている単体スクリプト。 **まだ `install.py` を持たない**ので、
+`Documents\maya\scripts` に手で置いて Script Editor から import して使う。
+`/scaffold` で順次このリポジトリの標準セットに載せていく。
+
+| フォルダ | 中身 | Qt | 備考 |
+|---|---|---|---|
+| [ConstrainInspector](ConstrainInspector/) | `constraint_inspector.py` | PySide2 | **Maya 2025 では動かない**（要 PySide6 対応） |
+| [MgearToDWpicker](MgearToDWpicker/) | `mgear_pkr_to_dwpicker.py` | PySide2 | mGear Anim Picker (.pkr) → DreamWall Picker (.json) 変換。**2025 不可** |
+| [PlayblastTool](PlayblastTool/) | `playblast_tool.py` | — | `cmds` のみ |
+| [SelectedReferenceDelete](SelectedReferenceDelete/) | `SelectedReferenceDelete.py` | — | `cmds` のみ |
+| [TimewarpHUD](TimewarpHUD/) | `scene_timewarp_hud.py` | — | `cmds` のみ |
+| [UnloadReferenceDelete](UnloadReferenceDelete/) | `unloadReferenceDelete.py` | — | `cmds` のみ |
+| [toon_outline_manager](toon_outline_manager/) | `toon_outline_manager.py` | PySide2 | **Maya 2025 では動かない**（要 PySide6 対応） |
+
 ## 更新方法（ドキュメント）
 
 ツールの `__version__` を上げたら、このテーブルも合わせて更新する。
