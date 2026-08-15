@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Edit(**/PROGRESS.md)",
+      "Write(**/PROGRESS.md)",
+      "Edit(**/SPEC.md)",
+      "Write(**/SPEC.md)",
+      "Edit(**/CHANGELOG.md)",
+      "Write(**/CHANGELOG.md)",
+      "Edit(docs/archive/**)",
+      "Write(docs/archive/**)",
+      "Bash(python tools/check_tools.py:*)",
+      "Bash(python -m unittest:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
+    ]
+  }
+}

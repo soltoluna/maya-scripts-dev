@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.tmp_install
+.vscode/
+.idea/
+# Maya が作業中に吐くもの（このリポジトリに入る想定は無いが保険）
+*.ma.swatches
+*.mayaSwatches/
