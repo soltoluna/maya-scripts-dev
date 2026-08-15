@@ -91,24 +91,23 @@ Qt5 → Qt6 で実際にぶつかる差（import 名だけ直しても落ちる�
 
 ### 新規ツール
 
-ツール 1 本が 1 フォルダ。 **中に同名のパッケージを持つ**（`install.py` をパッケージの
-外に置くため。 `install.py` は単体で GitHub から fetch されて `exec` されるので、
-パッケージの一部にしてはいけない）。
+ツール 1 本が 1 フォルダ。 **中に同名のパッケージを持つ**。 この「同名 2 段」が
+**ハブ `install.py` の探索条件そのもの**で、崩すと丸ごと配布されない。
 
 ```
+install.py                リポジトリ直下。 全ツール共通のハブ（ツール側には置かない）
 <tool_name>/
-├── install.py            エンドユーザーが唯一触るファイル（Maya にドラッグ）
 ├── <tool_name>/          実装本体（Maya の userScriptDir にこの形で配置される）
-│   ├── __init__.py       __version__ と show() をここに置く
+│   ├── __init__.py       __version__ / SHELF_LABEL / NAMESPACE / show()
 │   ├── core.py           Maya 非依存の純ロジック（← 自宅でテストできるのはここ）
 │   ├── ui.py             cmds による UI。 ロジックを持たない
-│   └── dev_tools.py      バージョン表示 / GitHub から更新 / リロード
+│   └── dev_tools.py      バージョン表示 / GitHub から更新（無改変でコピー）
 ├── SPEC.md               現行仕様・設計判断 + `## 実装状況`
 ├── README.md             ユーザー目線の機能・使い方・制約
 ├── CHANGELOG.md          版ごとの経緯
 └── tests/                Maya 非依存の回帰テスト
     ├── _bootstrap.py     maya.cmds スタブを sys.modules に注入
-    └── test_tool_meta.py メタ情報・_REMOTE_FILES・後片付けの検査
+    └── test_tool_meta.py メタ情報・配布形・後片付けの検査
 ```
 
 **`core.py` と `ui.py` を分ける理由**: 自宅に Maya が無いので、`cmds` を呼ぶコードは
@@ -121,13 +120,24 @@ Qt5 → Qt6 で実際にぶつかる差（import 名だけ直しても落ちる�
 **実装の全パターンと踏んだ落とし穴は [`docs/MAYA_HOT_UPDATE_PATTERNS.md`](docs/MAYA_HOT_UPDATE_PATTERNS.md) に
 まとまっている。 ここに書いていない挙動で迷ったら再調査せずそちらを読む。**
 
-- 初回のみ: `install.py` を Maya のビューポートにドラッグ&ドロップ
-- 以降: ツール UI の「GitHub から更新」ボタン、またはシェルフボタン**右クリック** > Update
+**`install.py` はリポジトリ直下に 1 本だけ**（2026-08-16 にツールごとから集約）。
+GitHub の tree API で `<名前>/<名前>/` の形のフォルダを探し、**全ツールをまとめて**
+配る。 新しいツールを足しても**どこにも登録しなくていい**。
+
+- 初回のみ: リポジトリ直下の `install.py` を Maya のビューポートにドラッグ&ドロップ
+  （これ 1 回で全ツールが入る）
+- 以降: ツール UI の「GitHub から更新」ボタン、またはシェルフボタン**右クリック** >
+  Update All Tools。 **どちらも全ツールをまとめて更新する**
   - **同じファイルを 2 回ドラッグしても何も起きない**（`onMayaDroppedPythonFile` は
     セッション内で 1 度しか呼ばれない）。 ドラッグはアップデート手段にならない
 - 更新は必ず **commit SHA を含む immutable URL** から取る。 `raw.githubusercontent.com` の
   CDN は**クエリ文字列を無視してパスだけで**キャッシュするので、`?_=<時刻>` は効かない
 - 実機に届く条件は **push 済みであること**。 ローカルのコミットは実機から見えない
+- **未認証の GitHub API は 1 時間 60 回 / IP。** 会社は NAT で全員が同じ枠を共有する。
+  ハブが API を 2 回（SHA 解決 + tree）しか使わないのはこのため。 更新経路に
+  API コールを足すときはこの枠を思い出すこと
+- **ハブはどのパッケージにも import 依存を持たせない。** パッケージが壊れて
+  import できないときに、直すための更新まで走らなくなると詰む
 
 ## ルール
 
@@ -167,14 +177,14 @@ WINDOW = _NS + "Win"
 _OPTVAR_LAST_TARGET = _NS + "_last_target"
 ```
 
-- **`install.py` の `_NAMESPACE` は `__init__.py` の `NAMESPACE` と同じ値にする。**
+- **ハブ `install.py` の `_NAMESPACE` は各 `__init__.py` の `NAMESPACE` と同じ値にする。**
   `_close_existing_window()` がこの規則でウィンドウを探すので、ずれると更新後に
   古いウィンドウが残る（`check_tools.py` とテストが突き合わせる）
-- **モジュール名 = フォルダ名 = `install.py` の `_MODULE` = `_REPO_SUBDIR`。**
-  この 4 つがずれるのが最頻の事故（`check_tools.py` が検査する）
+- **モジュール名 = フォルダ名。** この 2 つがずれるとハブの探索
+  （`<名前>/<名前>/`）から外れ、**そのツールだけ実機に届かなくなる**
 - `check_tools.py` とテストは、optionVar のリテラルキーが `<NAMESPACE>_<モジュール名>`
   で始まるかを検査する。 `lastTarget` のような汎用名を書いた時点で止まる
-- **チームで別の札に変えるなら `NAMESPACE` と `_NAMESPACE` の 2 箇所だけ**
+- **チームで別の札に変えるなら 各 `NAMESPACE` とハブの `_NAMESPACE` だけ**
   （`ars` など）。 それ以外は組み立てなので自動で追従する
 
 ### バージョン
@@ -193,28 +203,36 @@ _OPTVAR_LAST_TARGET = _NS + "_last_target"
 - バージョンを上げたら `SPEC.md` の `## 実装状況` に `### vX.Y.Z` を、`CHANGELOG.md` に
   `## X.Y.Z — <一行見出し>` を追記する（新しいものを上に積む）
 
-### モジュールを増やしたら `_REMOTE_FILES` に追記する
+### モジュールを増やしても登録作業は無い（ただし拡張子には注意）
 
-`install.py` はダウンロード対象を `_REMOTE_FILES` のハードコード一覧で管理している。
-**新しい `.py` を足して追記を忘れると、実機で `ModuleNotFoundError` になる**
-（`docs/MAYA_HOT_UPDATE_PATTERNS.md` §1-10）。 自宅では絶対に再現しないので、
-`python tools\check_tools.py <ツール名>` が突き合わせる。 **コミット前に必ず走らせる。**
+ハブは tree walk でパッケージの中身を全部配るので、**`.py` を足しても
+どこにも追記しなくてよい**（`_REMOTE_FILES` は 2026-08-16 に廃止した。
+`docs/MAYA_HOT_UPDATE_PATTERNS.md` §1-10 の事故は原理的に起きなくなった）。
+
+**残っている穴は拡張子だけ。** ハブは `_ALLOWED_SUFFIXES` で対象を絞っている
+ので、未登録の拡張子でリソースを足すと実機にだけ届かない。 ルートの
+`tests/test_installer.py` がパッケージの実体と突き合わせて検出する。
+**コミット前に `tests/` とツールの `tests/` の両方を走らせる。**
 
 ### その他
 
 - `__pycache__/` はコミットしない
-- `install.py` は**パッケージに依存しない自己完結**を保つ。 パッケージが壊れていても
-  Update が走らないと復旧できなくなる
+- **ツールフォルダに `install.py` を置かない**（`check_tools.py` が ERROR）。
+  配布ロジックが 2 箇所になると必ず片方が古くなる
+- ハブ `install.py` は**パッケージに依存しない自己完結**を保つ。 パッケージが
+  壊れていても Update が走らないと復旧できなくなる
 
 ## ツール標準セット
 
 すべてのツールは以下を揃える。 定義と設計意図は [`docs/TOOL_SCAFFOLD.md`](docs/TOOL_SCAFFOLD.md)、
 雛形の実体は [`docs/templates/tool_template/`](docs/templates/) にある。
 
+配布は**リポジトリ直下のハブ `install.py`** が担うので、ツール側には置かない。
+
 | 資産 | 中身 |
 |---|---|
-| `install.py` | ドラッグ&ドロップ インストーラ。 SHA 固定 URL・原子的書き込み・`__pycache__` 掃除・シェルフ登録 |
-| `dev_tools.py` | UI 内のバージョン表示と「GitHub から更新」ボタン |
+| `<pkg>/__init__.py` | `__version__` / `SHELF_LABEL` / `NAMESPACE` / `show()` |
+| `dev_tools.py` | UI 内のバージョン表示と「GitHub から更新」ボタン（無改変でコピー） |
 | `SPEC.md` | 現行仕様・アーキテクチャ・設計判断 + `## 実装状況` |
 | `README.md` | ユーザー目線の機能・使い方・制約・**インストール手順** |
 | `CHANGELOG.md` | 版ごとの経緯・試行錯誤・不具合修正の細部 |
@@ -227,20 +245,23 @@ _OPTVAR_LAST_TARGET = _NS + "_last_target"
 - **既存ツールに着手するとき（コードを触る前）に `python tools\check_tools.py <ツール名>`
   を走らせ、標準セットが欠けていたら `/scaffold <ツール名>` で先に補完する。**
   補完してよいかだけ一言確認し、拒否されなければ進める。 既にあるものは上書きしない
-- **コードを変更したら、そのツールの `tests/` を走らせてから報告する。**
-  併せて `check_tools.py` で **0 error** を確認する
+- **コードを変更したら、そのツールの `tests/` とルートの `tests/` を走らせてから
+  報告する。** 併せて `check_tools.py` で **0 error** を確認する
 - **実機確認ができていないことを報告に必ず明記する。** 自宅に Maya は無いので、
   ここで「動作確認しました」とは書けない。 実機で確かめてほしい手順を添える
 
 ### 検査コマンド
 
 ```powershell
-python tools\check_tools.py                    # 全ツール（ERROR があれば終了コード 1）
+python tools\check_tools.py                    # ハブ + 全ツール（ERROR があれば終了コード 1）
 python tools\check_tools.py rename_helper      # 指定したツールだけ
 python tools\check_tools.py --list-missing     # 標準セットの充足状況だけ
 
 cd rename_helper\tests
-python -m unittest discover -v                 # Maya 不要
+python -m unittest discover -v                 # ツール固有（Maya 不要）
+
+cd ..\..\tests
+python -m unittest discover -v                 # ハブ install.py（配布の形）
 ```
 
 ## レビュー

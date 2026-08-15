@@ -46,6 +46,7 @@ import types
 TOOL_DIR = pathlib.Path(__file__).resolve().parent.parent
 PACKAGE_NAME = TOOL_DIR.name
 PACKAGE_DIR = TOOL_DIR / PACKAGE_NAME
+REPO_ROOT = TOOL_DIR.parent
 
 
 # --- 記録用のグローバル ------------------------------------------------------
@@ -429,5 +430,9 @@ def tool_source_files():
 
 
 def installer_path():
-    """`install.py` のパス。"""
-    return TOOL_DIR / "install.py"
+    """ハブ `install.py` のパス（**リポジトリ直下**）。
+
+    ツールごとの `install.py` は廃止した。 リポジトリ直下の 1 本が tree API で
+    全ツールを列挙してまとめて配る（`docs/TOOL_SCAFFOLD.md`）。
+    """
+    return REPO_ROOT / "install.py"

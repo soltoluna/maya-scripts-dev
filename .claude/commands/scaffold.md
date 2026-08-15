@@ -23,8 +23,8 @@ python tools\check_tools.py <ツール名>
 ## 2. パッケージ構成にする
 
 `check_tools.py` が「パッケージが無い」と言ったら、**他の何より先にここを済ませる。**
-`install.py` はパッケージ単位でファイルを配るので、構成が違うと配布そのものが
-成立しない。
+ハブ `install.py` は `<名前>/<名前>/` の形のフォルダだけを配布対象として探すので、
+構成が違うと配布そのものが成立しない（＝実機に何も届かない）。
 
 ```powershell
 New-Item -ItemType Directory <ツール名>\<ツール名>
@@ -32,6 +32,7 @@ git mv <ツール名>\<何か>.py <ツール名>\<ツール名>\__init__.py
 ```
 
 - `__version__` を `__init__.py` の先頭付近に置く（**版数の唯一の情報源**）
+- `SHELF_LABEL` を `__init__.py` に置く（10 文字以内。 ハブがシェルフボタンに使う）
 - `NAMESPACE = "ntk"` を `__init__.py` に置き、**optionVar / scriptJob /
   ウィンドウ名を `<NAMESPACE>_<モジュール名>` で切り直す**。既存スクリプトは
   接頭辞なしの汎用キー（`lastDir` など）を使っていることが多く、社内配布すると
@@ -47,14 +48,11 @@ git mv <ツール名>\<何か>.py <ツール名>\<ツール名>\__init__.py
 作る順序と作り方。それぞれ**ツール本体を読んで実際の内容を書く**こと。
 テンプレートの穴埋め文言をそのまま残さない。
 
-### install.py
+### install.py は作らない
 
-```powershell
-Copy-Item docs\templates\tool_template\install.py <ツール名>\install.py
-```
-
-CUSTOMIZE ブロックを埋める。**`_REMOTE_FILES` はパッケージの `.py` を実際に
-列挙して書く**（`check_tools.py` が突き合わせる）。
+配布はリポジトリ直下のハブ 1 本に集約してある。**ツールフォルダに `install.py` を
+置かないこと**（置くと `check_tools.py` が ERROR を出す）。`<名前>/<名前>/__init__.py`
+の形になっていれば、ハブが tree API で自動的に見つけて配る。登録作業は無い。
 
 ### dev_tools.py（バージョン表示と「GitHub から更新」）
 
@@ -62,13 +60,11 @@ CUSTOMIZE ブロックを埋める。**`_REMOTE_FILES` はパッケージの `.p
 Copy-Item docs\templates\tool_template\tool_template\dev_tools.py <ツール名>\<ツール名>\dev_tools.py
 ```
 
-- CUSTOMIZE ブロックの GitHub 座標を `install.py` と**同一値**にする
+- **中身は 1 文字も書き換えない**（パッケージ名は `__package__` から導き、
+  GitHub 座標は全ツール共通。`check_tools.py` がハブと突き合わせる）
 - `ui.py` の `show()` で、ウィンドウ下端に `dev_tools.build_footer()` を呼ぶ
-- **`_REMOTE_FILES` に `dev_tools.py` を追記する**（忘れると実機だけで落ちる）
-- ウィンドウ名が `<モジュール名>Win` でなければ直す。`install.py` の
+- ウィンドウ名が `<NAMESPACE>_<モジュール名>Win` でなければ直す。ハブの
   `_close_existing_window()` がこの規則で古いウィンドウを閉じるため
-
-`dev_tools.py` は**中身を書き換えない**（パッケージ名は `__package__` から導く）。
 
 ### tests/
 
@@ -87,7 +83,7 @@ python -m unittest discover -v
 ```
 
 `test_tool_meta` が落ちたら、それは**既存ツールの実際の不備**である可能性が高い
-（`_REMOTE_FILES` の漏れ、バージョン不一致、undo チャンクの閉じ忘れ）。
+（バージョン不一致、`SHELF_LABEL` の欠落、undo チャンクの閉じ忘れ）。
 テストを緩めるのではなくツール側を直す。
 
 ### README.md
@@ -122,16 +118,20 @@ python -m unittest discover -v
 ```powershell
 cd <ツール名>\tests
 python -m unittest discover -v
-cd ..\..
+cd ..\..\tests
+python -m unittest discover -v          # ハブがこのツールを拾えるか
+cd ..
 python tools\check_tools.py <ツール名>
 ```
 
 **tests が全件通り、check_tools が `0 error` になるまで直す。**
+**ルート `tests/` も必ず走らせる** — ハブの探索規則から外れていると
+ここだけが落ちる（外れたまま push すると実機に何も届かない）。
 
 ## 6. コミットして push する
 
 ```
-chore(<ツール名>): 標準セットを整備（install.py/dev_tools/tests/CHANGELOG） (vx.y.z)
+chore(<ツール名>): 標準セットを整備（dev_tools/tests/CHANGELOG） (vx.y.z)
 ```
 
 ## 7. 報告する
@@ -139,7 +139,7 @@ chore(<ツール名>): 標準セットを整備（install.py/dev_tools/tests/CHA
 足したもの・足さなかったもの（と理由）・テスト結果・バージョン変更を伝える。
 テストが既存の不備を炙り出した場合は、それも明記する。
 
-**実機確認の手順を必ず添え、実機未確認であることを明記する。** 特に `install.py` を
-新しく足した場合は、**一度だけドラッグ&ドロップし直す必要がある**（シェルフボタンの
-コマンドが古いままなので）。既に入れてある版からの更新ボタンでは新しい配布経路に
-乗り換えられない、という点を伝える。
+**実機確認の手順を必ず添え、実機未確認であることを明記する。** ハブを既に入れて
+いる人は、**更新ボタンを押すだけで新しく標準セット化したツールも降ってくる**
+（ハブが tree API で列挙するため）。初めて入れる人だけ、リポジトリ直下の
+`install.py` を一度ドラッグ&ドロップする。

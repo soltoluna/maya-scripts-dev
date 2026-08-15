@@ -12,9 +12,12 @@ CLAUDE.md のルールのうち、機械的に確認できるものを自動化�
 
 | 情報 | 情報源 |
 |---|---|
-| バージョン | `<tool>/<tool>/__init__.py` の `__version__` |
-| GitHub 座標 / 配布ファイル一覧 | `<tool>/install.py` の定数 |
+| バージョン / シェルフラベル | `<tool>/<tool>/__init__.py` の `__version__` / `SHELF_LABEL` |
+| GitHub 座標 / 名前空間 | **リポジトリ直下**の `install.py`（ハブ）の定数 |
 | カテゴリ / 起動方法 / 機能概要 | `<tool>/SPEC.md` の「概要」 |
+
+配布対象のファイル一覧はどこにも宣言しない。 ハブが GitHub の tree API で
+`<名前>/<名前>/` を自動列挙する（`tests/test_installer.py` が検査する）。
 
 ## 使い方
 
@@ -30,12 +33,12 @@ python tools\check_tools.py --strict           # WARN も終了コード 1 に�
 ## 検査項目
 
 ERROR（放置すると実機で壊れるもの）
-- `<tool>/<tool>/__init__.py` がある（パッケージ構成）
+- `<tool>/<tool>/__init__.py` がある（パッケージ構成 = ハブの探索条件）
 - `__version__` が定義され `x.y.z` 形式
-- `install.py` がある / `_MODULE` がフォルダ名と一致 / `_REPO_SUBDIR` が妥当
-- **`_REMOTE_FILES` がパッケージの `.py` と過不足なく一致**（追記忘れは
-  実機だけで `ModuleNotFoundError` になる）
-- `install.py` と `dev_tools.py` の GitHub 座標が一致
+- ツールフォルダに `install.py` が**残っていない**（配布はハブに集約済み）
+- ハブ `install.py` と `dev_tools.py` の GitHub 座標が一致
+- `NAMESPACE` がハブの `_NAMESPACE` と一致（ずれると更新後に古い
+  ウィンドウが残る）
 - パッケージ直下に `show()` がある（シェルフボタンの入口）
 - すべての `.py` が Python 3.10 の構文で解析できる（Maya 2024 = 下限）
 - `SPEC.md` がある / 「概要」のバージョンが `__version__` と一致
@@ -43,6 +46,7 @@ ERROR（放置すると実機で壊れるもの）
 - ルート `README.md` の一覧表に行がある / バージョンが一致
 
 WARN（標準セットとして揃えたいもの）
+- `SHELF_LABEL` が定義され 10 文字以内
 - `README.md` / `CHANGELOG.md` / `tests/` / `dev_tools.py` がある
 - `CHANGELOG.md` に現行バージョンの見出しがある
 - `core.py` があり、`maya` を import していない
@@ -69,7 +73,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 # **標準セットの目印（install.py か同名パッケージ）があるものだけ**を
 # 対象にする。 目印が無いフォルダ＝標準セット化前の既存スクリプトで、
 # 検査対象外（消さずに一覧だけ出す）
-EXCLUDED_DIRS = {"docs", "tools"}
+EXCLUDED_DIRS = {"docs", "tools", "tests"}
 TARGET_PYTHON = (3, 10)         # Maya 2024（下限）。 CLAUDE.md「環境」と揃える
 PLACEHOLDERS = ("YOUR_GITHUB_USERNAME", "YOUR_REPO_NAME", "OWNER", "REPO")
 
@@ -232,7 +236,7 @@ def _root_readme_rows():
 # 検査
 # --------------------------------------------------------------------------- #
 
-def check_tool(tool_dir, readme_rows):
+def check_tool(tool_dir, readme_rows, hub):
     report = Report(tool_dir.name)
     name = tool_dir.name
     pkg_dir = tool_dir / name
@@ -262,7 +266,21 @@ def check_tool(tool_dir, readme_rows):
     if namespace is None:
         report.warn("__init__.py に NAMESPACE が無い"
                     "（optionVar / scriptJob / ウィンドウ名の衝突回避に使う）")
+    elif hub and hub.get("_NAMESPACE") != namespace:
+        report.error("NAMESPACE がハブ install.py (%r) とパッケージ (%r) で"
+                     "食い違う（更新後に古いウィンドウが残る）"
+                     % (hub.get("_NAMESPACE"), namespace))
     ns_prefix = "%s_%s" % (namespace, name) if namespace else name
+
+    # --- シェルフラベル -----------------------------------------------------
+    # ハブがここを読んでシェルフボタンを貼る。 無くてもモジュール名から
+    # 生成されるので WARN 止まりだが、自動生成の名前は読みにくい
+    label = consts.get("SHELF_LABEL")
+    if label is None:
+        report.warn("__init__.py に SHELF_LABEL が無い"
+                    "（ハブがシェルフボタンに出す 10 文字以内の短い名前）")
+    elif not (0 < len(str(label)) <= 10):
+        report.warn("SHELF_LABEL は 10 文字以内にする: %r" % (label,))
 
     # --- Python バージョン --------------------------------------------------
     sources = _package_sources(pkg_dir)
@@ -278,56 +296,22 @@ def check_tool(tool_dir, readme_rows):
                          % (TARGET_PYTHON[0], TARGET_PYTHON[1],
                             path.relative_to(tool_dir).as_posix(), exc))
 
-    # --- install.py ---------------------------------------------------------
-    if not installer.is_file():
-        report.error("install.py が無い（配布とホット更新の入口）")
-    else:
-        icons = _module_constants(installer)
+    # --- 配布 ---------------------------------------------------------------
+    # 配布はリポジトリ直下のハブ 1 本に集約した。 ツール側に残っていると
+    # 同じ配布ロジックが 2 箇所になり、必ず片方が古くなる
+    if installer.is_file():
+        report.error("ツールフォルダに install.py が残っている"
+                     "（配布はリポジトリ直下のハブ 1 本に集約した）")
 
-        if icons.get("_MODULE") != name:
-            report.error("install.py の _MODULE がフォルダ名と違う: %r != %r"
-                         % (icons.get("_MODULE"), name))
-
-        subdir = icons.get("_REPO_SUBDIR")
-        if subdir not in ("", name):
-            report.error("install.py の _REPO_SUBDIR はフォルダ名 %r か "
-                         "空文字にする: %r" % (name, subdir))
-
-        declared = set(icons.get("_REMOTE_FILES") or ())
-        actual = {p.relative_to(pkg_dir).as_posix() for p in sources}
-        for rel in sorted(actual - declared):
-            report.error("install.py の _REMOTE_FILES に未登録: %s"
-                         "（実機で ModuleNotFoundError になる）" % (rel,))
-        for rel in sorted(declared - actual):
-            report.error("install.py の _REMOTE_FILES に実在しないファイル: %s"
-                         "（ダウンロードが 404 で止まる）" % (rel,))
-
-        for key in ("_GITHUB_OWNER", "_GITHUB_REPO"):
-            if str(icons.get(key, "")) in PLACEHOLDERS:
-                report.warn("install.py の %s がプレースホルダのまま: %r"
-                            % (key, icons.get(key)))
-
-        if "onMayaDroppedPythonFile" not in _function_names(installer):
-            report.error("install.py に onMayaDroppedPythonFile が無い"
-                         "（ドラッグ&ドロップが効かない）")
-
-        # dev_tools との突き合わせ
-        dev_tools = pkg_dir / "dev_tools.py"
-        if not dev_tools.is_file():
-            report.missing_asset("dev_tools.py（バージョン表示と更新ボタン）")
-        else:
-            dcons = _module_constants(dev_tools)
-            for key in ("_GITHUB_OWNER", "_GITHUB_REPO", "_GITHUB_BRANCH",
-                        "_REPO_SUBDIR"):
-                if icons.get(key) != dcons.get(key):
-                    report.error("%s が install.py と dev_tools.py で食い違う: "
-                                 "%r != %r" % (key, icons.get(key), dcons.get(key)))
-
-        # NAMESPACE がずれると、更新時に別名のウィンドウを探して閉じ損なう
-        if namespace is not None and icons.get("_NAMESPACE") != namespace:
-            report.error("NAMESPACE が install.py (%r) とパッケージ (%r) で"
-                         "食い違う（更新後に古いウィンドウが残る）"
-                         % (icons.get("_NAMESPACE"), namespace))
+    dev_tools = pkg_dir / "dev_tools.py"
+    if not dev_tools.is_file():
+        report.missing_asset("dev_tools.py（バージョン表示と更新ボタン）")
+    elif hub:
+        dcons = _module_constants(dev_tools)
+        for key in ("_GITHUB_OWNER", "_GITHUB_REPO", "_GITHUB_BRANCH"):
+            if hub.get(key) != dcons.get(key):
+                report.error("%s がハブ install.py と dev_tools.py で食い違う: "
+                             "%r != %r" % (key, hub.get(key), dcons.get(key)))
 
     # --- レイヤ分離と命名 ---------------------------------------------------
     core_py = pkg_dir / "core.py"
@@ -433,12 +417,17 @@ def _candidate_dirs():
     return sorted(p for p in REPO_ROOT.iterdir()
                   if p.is_dir()
                   and not p.name.startswith(".")
+                  and not p.name.startswith("__")   # __pycache__ など
                   and p.name not in EXCLUDED_DIRS)
 
 
 def _has_standard_set(path):
-    """標準セットを適用済みか（`install.py` か同名パッケージがあるか）。"""
-    return (path / "install.py").is_file() or (path / path.name / "__init__.py").is_file()
+    """標準セットを適用済みか（同名パッケージがあるか）。
+
+    **これはハブ `install.py` の探索条件そのもの。** ここに載らない
+    フォルダは配布もされない（`tests/test_installer.py` が突き合わせる）。
+    """
+    return (path / path.name / "__init__.py").is_file()
 
 
 def discover_tools():
@@ -448,6 +437,41 @@ def discover_tools():
 def discover_legacy():
     """標準セット化前の既存スクリプト（検査対象外）。"""
     return [p for p in _candidate_dirs() if not _has_standard_set(p)]
+
+
+def check_hub():
+    """リポジトリ直下のハブ `install.py` を検査する（全ツール共通の配布経路）。"""
+    report = Report("install.py (hub)")
+    hub_path = REPO_ROOT / "install.py"
+    if not hub_path.is_file():
+        report.error("リポジトリ直下に install.py が無い"
+                     "（全ツールの配布とホット更新の入口）")
+        return report, {}
+
+    consts = _module_constants(hub_path)
+
+    source = _read(hub_path)
+    if source is not None:
+        try:
+            ast.parse(source, str(hub_path), feature_version=TARGET_PYTHON)
+        except SyntaxError as exc:
+            report.error("Python %d.%d で解析できない: install.py (%s)"
+                         % (TARGET_PYTHON[0], TARGET_PYTHON[1], exc))
+
+    if "onMayaDroppedPythonFile" not in _function_names(hub_path):
+        report.error("install.py に onMayaDroppedPythonFile が無い"
+                     "（ドラッグ&ドロップが効かない）")
+
+    for key in ("_GITHUB_OWNER", "_GITHUB_REPO"):
+        if str(consts.get(key, "")) in PLACEHOLDERS:
+            report.warn("install.py の %s がプレースホルダのまま: %r"
+                        % (key, consts.get(key)))
+
+    if consts.get("_NAMESPACE") is None:
+        report.error("install.py に _NAMESPACE が無い"
+                     "（更新時に古いウィンドウを閉じるのに使う）")
+
+    return report, consts
 
 
 def _print_legacy(legacy):
@@ -487,7 +511,8 @@ def main(argv=None):
             return 2
 
     readme_rows = _root_readme_rows()
-    reports = [check_tool(p, readme_rows) for p in tools]
+    hub_report, hub = check_hub()
+    reports = [check_tool(p, readme_rows, hub) for p in tools]
 
     if args.list_missing:
         for report in reports:
@@ -496,13 +521,11 @@ def main(argv=None):
         _print_legacy(legacy)
         return 0
 
-    if not reports:
+    if not reports and not args.tool:
         print("標準セットを適用したツールはまだ無い（`/new-tool <名前>` で作る）。")
-        _print_legacy(legacy)
-        return 0
 
     total_errors = total_warns = 0
-    for report in reports:
+    for report in [hub_report] + reports:
         total_errors += len(report.errors)
         total_warns += len(report.warns)
         mark = "ERROR" if report.errors else ("warn" if report.warns else "ok")
@@ -512,7 +535,7 @@ def main(argv=None):
         for message in report.warns:
             print("  warn   %s" % (message,))
 
-    print("\n%d tool(s): %d error, %d warn"
+    print("\nhub + %d tool(s): %d error, %d warn"
           % (len(reports), total_errors, total_warns))
     _print_legacy(legacy)
     if total_errors:

@@ -1,7 +1,7 @@
 # Unload Reference Delete — 詳細仕様
 
 ## 概要
-- バージョン: 0.1.0 / 対応Maya: 2024+
+- バージョン: 0.2.0 / 対応Maya: 2024+
 - カテゴリ: Reference
 - 表示場所: シェルフボタン `UnldRefDel`（左クリックで起動）
 - シーン中の**アンロード中（unloaded）のリファレンス**を一覧し、まとめて
@@ -11,9 +11,9 @@
 ## アーキテクチャ
 
 ```
-install.py                  エンドユーザーが触る唯一のファイル（Maya にドラッグ）
+../install.py               リポジトリ直下のハブ。 全ツールをまとめて配る
 unload_reference_delete/
-  __init__.py               __version__（版数の唯一の情報源）/ show() / remove_unloaded()
+  __init__.py               __version__ / SHELF_LABEL / show() / remove_unloaded()
   core.py                   Maya 非依存の純ロジック ← 自宅でテストできるのはここだけ
   ui.py                     cmds による UI と、cmds からの読み取り
   dev_tools.py              バージョン表示と「GitHub から更新」（全ツール共通・触らない）
@@ -72,6 +72,13 @@ unload_reference_delete/
 - optionVar `ntk_unload_reference_delete_confirm_before_remove` に保存
 
 ## 実装状況
+
+### v0.2.0
+- ツール固有の `install.py` を廃止し、**リポジトリ直下のハブ 1 本**に配布を
+  集約した。 このツール側の変更は `SHELF_LABEL` の追加だけ（ハブがシェルフ
+  ボタンを貼るときに読む）。 配布ファイルの宣言（`_REMOTE_FILES`）は無くなり、
+  ハブが tree API で自動列挙する。
+- **実機未確認**。 v0.1.0 の未確認項目に加え、新しい配布経路そのものも未確認。
 
 ### v0.1.0
 - 既存スクリプトを標準セット（`install.py` / `core` + `ui` 分離 / `dev_tools` /

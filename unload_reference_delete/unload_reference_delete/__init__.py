@@ -20,7 +20,11 @@
 from __future__ import annotations
 
 # 先に定義する（サブモジュールが `from . import __version__` で参照するため）
-__version__ = "0.1.0"
+__version__ = "0.2.0"
+
+# シェルフボタンに出す短い名前（10 文字以内）。 リポジトリ直下のハブ
+# `install.py` がここを読んでボタンを貼る
+SHELF_LABEL = "UnldRefDel"
 
 # ─── 衝突回避の名前空間 ────────────────────────────────────────────────────
 # Maya の optionVar / scriptJob / ウィンドウ名は**全体で 1 つのフラットな空間**を
@@ -39,7 +43,7 @@ from . import dev_tools  # noqa: E402  バージョン表示 / GitHub から更�
 from . import ui        # noqa: E402  cmds による UI
 
 __all__ = ["show", "remove_unloaded", "core", "ui", "dev_tools",
-           "__version__", "NAMESPACE"]
+           "__version__", "NAMESPACE", "SHELF_LABEL"]
 
 
 def show():

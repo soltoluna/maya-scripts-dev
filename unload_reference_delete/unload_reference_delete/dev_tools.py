@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Unload Reference Delete — バージョン表示と「GitHub から更新」。
 
-全ツール共通の仕組みなので、**中身は基本的に触らない**。 書き換えるのは
-下の CUSTOMIZE ブロック（GitHub の座標）だけ。
+全ツール共通の仕組みなので、**このファイルは丸ごとコピーして使う**。
+ツールごとに書き換える値は 1 つも無い（パッケージ名は `__package__` から導き、
+更新はリポジトリ直下のハブ `install.py` に任せる）。
 
 更新の流れは 3 段に分けてある（patterns doc §1-9）。 ボタンのコールバックの中で
 自分を載せている親ウィンドウを消すと、その後の `show()` で開いたウィンドウが
@@ -24,13 +25,14 @@ from maya import cmds
 from . import __version__
 
 
-# ─── CUSTOMIZE ────────────────────────────────────────────────────────────
-# install.py と同じ値にする（`tools/check_tools.py` が突き合わせる）
+# ─── リポジトリ座標（全ツール共通・書き換えない）──────────────────────────
+# 更新はリポジトリ**直下**の install.py（ハブ）に任せる。 ハブが tree API で
+# 全ツールを列挙してまとめて配るので、ここにツール固有の値は無い。
+# `tools/check_tools.py` がハブの定数と突き合わせる
 _GITHUB_OWNER = "soltoluna"
 _GITHUB_REPO = "maya-scripts-dev"
 _GITHUB_BRANCH = "main"
-_REPO_SUBDIR = "unload_reference_delete"   # モノレポ内のツールフォルダ名
-# ─── END CUSTOMIZE ────────────────────────────────────────────────────────
+# ─── ここまで ─────────────────────────────────────────────────────────────
 
 
 # パッケージ名は自分の位置から導く。 定数で持つとリネーム時にずれるため
@@ -38,7 +40,7 @@ _PACKAGE = __package__ or __name__.rsplit(".", 1)[0]
 
 _GITHUB_API = "https://api.github.com/repos/%s/%s" % (_GITHUB_OWNER, _GITHUB_REPO)
 _GITHUB_RAW = "https://raw.githubusercontent.com/%s/%s" % (_GITHUB_OWNER, _GITHUB_REPO)
-_INSTALLER_PATH = "/".join([p for p in (_REPO_SUBDIR, "install.py") if p])
+_INSTALLER_PATH = "install.py"   # リポジトリ直下のハブ
 
 
 def resolve_latest_sha():
@@ -161,5 +163,7 @@ def build_footer():
     cmds.text(l="%s  v%s" % (_PACKAGE, __version__),
               al="left", fn="smallObliqueLabelFont")
     cmds.button(l="GitHub から更新", h=24, c=update_from_github,
-                ann="GitHub の最新版を取得して開き直します（Maya の再起動は不要）")
+                ann="GitHub の最新版を取得して開き直します。 "
+                    "**入っているツールは全部まとめて更新されます**"
+                    "（Maya の再起動は不要）")
     cmds.setParent("..")

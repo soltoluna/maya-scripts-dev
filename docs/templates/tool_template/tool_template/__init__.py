@@ -5,24 +5,31 @@
 
     tool_template  → <新しいモジュール名>  （フォルダ名・モジュール名・ウィンドウ名）
     Tool Template  → <新しい表示名>        （ウィンドウタイトル・ドキュメント）
-    ToolTmpl       → <シェルフラベル>      （シェルフボタン）
+    ToolTmpl       → <シェルフラベル>      （下の `SHELF_LABEL`）
 
 optionVar やウィンドウ名の識別子は `NAMESPACE` と `__package__` から組み立てて
 いるので、モジュール名さえ置換すれば自動で追従する（手で直す接頭辞は無い）。
 
-置換した時点で「Maya に入れればウィンドウが開き、GitHub から更新できる」状態に
-なっている。 実装は `core.py`（Maya 非依存の純ロジック）と `ui.py`（cmds）に分けて
-書く — 自宅に Maya が無いので、`core.py` に寄せた分だけ手元で検証できる。
+置換してリポジトリ直下に置いた時点で、**ハブ `install.py` が自動で拾う**
+（`<名前>/<名前>/__init__.py` の形になっていることが唯一の条件。 配布リストを
+どこかに登録する作業は無い）。
 
-**`__version__` がこのツールのバージョンの唯一の情報源。** `install.py` はここを
-読んで `previous → current` を出し、`SPEC.md` / `README.md` / ルート `README.md`
-がこの値と一致していることを `tools/check_tools.py` が検査する。
+実装は `core.py`（Maya 非依存の純ロジック）と `ui.py`（cmds）に分けて書く —
+自宅に Maya が無いので、`core.py` に寄せた分だけ手元で検証できる。
+
+**`__version__` がこのツールのバージョンの唯一の情報源。** ハブ `install.py` は
+ここを読んで `previous → current` を出し、`SPEC.md` / `README.md` /
+ルート `README.md` がこの値と一致していることを `tools/check_tools.py` が検査する。
 """
 
 from __future__ import annotations
 
 # 先に定義する（サブモジュールが `from . import __version__` で参照するため）
 __version__ = "0.1.0"
+
+# シェルフボタンに出す短い名前（10 文字以内）。 ハブ `install.py` がここを読んで
+# ボタンを貼る。 **表示名であってツール名ではない**ので接頭辞は付けない
+SHELF_LABEL = "ToolTmpl"
 
 # ─── 衝突回避の名前空間 ────────────────────────────────────────────────────
 # Maya の optionVar / scriptJob / ウィンドウ名は**全体で 1 つのフラットな空間**を
@@ -41,7 +48,8 @@ from . import core      # noqa: E402  Maya 非依存の純ロジック
 from . import dev_tools  # noqa: E402  バージョン表示 / GitHub から更新
 from . import ui        # noqa: E402  cmds による UI
 
-__all__ = ["show", "core", "ui", "dev_tools", "__version__", "NAMESPACE"]
+__all__ = ["show", "core", "ui", "dev_tools", "__version__", "NAMESPACE",
+           "SHELF_LABEL"]
 
 
 def show():

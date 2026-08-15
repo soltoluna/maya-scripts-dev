@@ -19,8 +19,8 @@ Maya のインストールは不要（Python 3.10+ の標準ライブラリの�
   生成された UI・optionVar・undo チャンク・`evalDeferred` の積み残し・
   scriptJob を記録するので、後片付けの検証に使える
 - `test_tool_meta.py` — ツール非依存のメタテスト。 バージョンの 3 箇所同期、
-  **`install.py` の `_REMOTE_FILES` とパッケージの実体の一致**、GitHub 座標の
-  一致、ウィンドウ名の規約、Python 3.10 構文、`show()` の一往復
+  **ハブ `install.py` が拾える形になっているか**、GitHub 座標と `NAMESPACE` の
+  一致、`SHELF_LABEL`、ウィンドウ名の規約、Python 3.10 構文、`show()` の一往復
 - `test_core.py` — このツール固有。 `core.plan_removal()` の仕分け
   （アンロード / 入れ子 / ノード不明）とパスの表示整形。 **実機と同じ結果が
   出る唯一の層**なので、ロジックを足したらまずここにテストを書く
@@ -47,5 +47,6 @@ Maya のインストールは不要（Python 3.10+ の標準ライブラリの�
 ## install.py をテストから実行しないこと
 
 スタブ環境では `from maya import cmds` が通ってしまうため、`install.py` を
-`exec` すると末尾の自動実行が**本当に GitHub へ取りに行く**。 静的解析
-（`ast`）だけで検査する。
+`exec` すると末尾の自動実行が**本当に GitHub へ取りに行き、実機に書き込む**。
+ここでは静的解析（`ast`）だけで検査する。 ハブのロジックを実際に動かす
+テストは、スタブを入れないリポジトリ直下の `tests/` にある。

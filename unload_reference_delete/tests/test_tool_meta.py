@@ -8,13 +8,14 @@
 
 1. `__version__` があり `x.y.z` 形式で、`SPEC.md` / `README.md` /
    `CHANGELOG.md` の表記と一致している（CLAUDE.md の同期ルールの機械化）
-2. **`install.py` の `_REMOTE_FILES` がパッケージの `.py` と過不足なく一致**
-   している。 追記忘れは実機だけで `ModuleNotFoundError` になり、自宅では
-   絶対に再現しない（`docs/MAYA_HOT_UPDATE_PATTERNS.md` §1-10）
-3. `install.py` と `dev_tools.py` の GitHub 座標（owner / repo / branch /
-   subdir）が食い違っていない
-4. ウィンドウ名が `<モジュール名>Win`（`install.py` の `_close_existing_window`
-   がこの規則で古いウィンドウを閉じる）
+2. **ハブ `install.py` が拾える形になっている**（`<名前>/<名前>/__init__.py`）。
+   配布リストの宣言は無く、ハブが tree API で列挙するので、`_REMOTE_FILES` の
+   追記忘れ（`docs/MAYA_HOT_UPDATE_PATTERNS.md` §1-10）はもう起きない。
+   代わりに「ハブの探索規則から外れていないか」をここで見る
+3. ハブ `install.py` と `dev_tools.py` の GitHub 座標（owner / repo / branch）と
+   `NAMESPACE` が食い違っていない
+4. ウィンドウ名が `<NAMESPACE>_<モジュール名>Win`（ハブの
+   `_close_existing_window` がこの規則で古いウィンドウを閉じる）
 5. `core.py` が `maya` を import していない（自宅でテストできる範囲を守る）
 6. すべての `.py` が **Python 3.10 の構文**で解析できる（Maya 2024 の Python。
    2025 は 3.11 なので、下限の 2024 に合わせておけば両方で動く）
@@ -29,7 +30,8 @@
 
 なお `install.py` は**このテストから実行しない**。 スタブ環境でも
 `from maya import cmds` が通ってしまい、末尾の自動実行が本当に GitHub へ
-取りに行くため。 静的解析だけで検査している。
+取りに行くため。 静的解析だけで検査している。 ハブ自体のロジック
+（探索規則・配布対象の拡張子）はリポジトリ直下の `tests/` で検査する。
 """
 
 from __future__ import annotations
@@ -156,55 +158,57 @@ class VersionCase(unittest.TestCase):
                          "%s のバージョンが __version__ と食い違っている" % (name,))
 
 
-class InstallerCase(unittest.TestCase):
-    """配布設定 — ここがずれると実機だけで壊れる。"""
+class DistributionCase(unittest.TestCase):
+    """配布 — ここがずれると実機だけで壊れる。
+
+    配布は**リポジトリ直下のハブ 1 本**が行う。 ハブは
+    `<名前>/<名前>/__init__.py` という形のフォルダを tree API で探して
+    中身を全部配るので、ツール側が守るべきことは「その形になっていること」と
+    「ハブと定数が食い違っていないこと」の 2 つだけ。
+    """
 
     def setUp(self):
         self.installer = _bootstrap.installer_path()
         if not self.installer.is_file():
-            self.skipTest("install.py が無い")
+            self.skipTest("リポジトリ直下に install.py が無い")
         self.consts = _module_constants(self.installer)
 
-    def test_module_matches_package_name(self):
-        self.assertEqual(self.consts.get("_MODULE"), _bootstrap.PACKAGE_NAME,
-                         "install.py の _MODULE がパッケージ名と違う")
+    def test_layout_matches_the_hub_discovery_rule(self):
+        """ハブが拾える形か。 外れると**丸ごと配布されない**。"""
+        self.assertEqual(_bootstrap.PACKAGE_DIR.name, _bootstrap.TOOL_DIR.name,
+                         "パッケージ名はツールフォルダ名と同じにする "
+                         "（ハブは <名前>/<名前>/ の形だけを探す）")
+        self.assertTrue((_bootstrap.PACKAGE_DIR / "__init__.py").is_file(),
+                        "パッケージに __init__.py が無い（ハブが拾わない）")
 
-    def test_repo_subdir_matches_tool_folder(self):
-        subdir = self.consts.get("_REPO_SUBDIR")
-        self.assertIn(subdir, ("", _bootstrap.TOOL_DIR.name),
-                      "_REPO_SUBDIR はツールフォルダ名か空文字にする")
+    def test_no_per_tool_installer_left_behind(self):
+        """ツールごとの install.py は廃止済み。 残っていると二重管理になる。"""
+        self.assertFalse(
+            (_bootstrap.TOOL_DIR / "install.py").is_file(),
+            "ツールフォルダに install.py が残っている "
+            "（配布はリポジトリ直下のハブ 1 本に集約した）")
 
-    def test_remote_files_cover_the_package(self):
-        """**追記忘れの検出。** 自宅では再現しない事故なので機械で止める。"""
-        declared = set(self.consts.get("_REMOTE_FILES") or ())
-        actual = {
-            p.relative_to(_bootstrap.PACKAGE_DIR).as_posix()
-            for p in _bootstrap.tool_source_files()
-        }
-        missing = sorted(actual - declared)
-        extra = sorted(declared - actual)
-        self.assertFalse(
-            missing,
-            "install.py の _REMOTE_FILES に未登録のファイルがある "
-            "（実機で ModuleNotFoundError になる）: %s" % (missing,))
-        self.assertFalse(
-            extra,
-            "_REMOTE_FILES に実在しないファイルがある "
-            "（ダウンロードが 404 で止まる）: %s" % (extra,))
+    def test_shelf_label_is_defined_and_short(self):
+        """ハブがシェルフボタンに出す名前。 長いとボタンから溢れる。"""
+        label = _module_constants(
+            _bootstrap.PACKAGE_DIR / "__init__.py").get("SHELF_LABEL")
+        self.assertIsNotNone(label, "__init__.py に SHELF_LABEL が無い "
+                                    "（ハブがシェルフボタンに出す短い名前）")
+        self.assertTrue(0 < len(label) <= 10,
+                        "SHELF_LABEL は 10 文字以内にする: %r" % (label,))
 
     def test_github_coordinates_agree_with_dev_tools(self):
         dev_tools = _bootstrap.PACKAGE_DIR / "dev_tools.py"
         if not dev_tools.is_file():
             self.skipTest("dev_tools.py が無い")
         theirs = _module_constants(dev_tools)
-        for key in ("_GITHUB_OWNER", "_GITHUB_REPO", "_GITHUB_BRANCH",
-                    "_REPO_SUBDIR"):
+        for key in ("_GITHUB_OWNER", "_GITHUB_REPO", "_GITHUB_BRANCH"):
             self.assertEqual(
                 self.consts.get(key), theirs.get(key),
-                "%s が install.py と dev_tools.py で食い違っている" % (key,))
+                "%s がハブ install.py と dev_tools.py で食い違っている" % (key,))
 
     def test_namespace_agrees_with_package(self):
-        """install.py の `_NAMESPACE` とパッケージの `NAMESPACE` は同じ値。
+        """ハブの `_NAMESPACE` とパッケージの `NAMESPACE` は同じ値。
 
         ずれると `_close_existing_window()` が別名のウィンドウを探すので、
         更新後に古いウィンドウが residual として残る。
@@ -213,7 +217,7 @@ class InstallerCase(unittest.TestCase):
         theirs = _module_constants(init_py).get("NAMESPACE")
         self.assertIsNotNone(theirs, "__init__.py に NAMESPACE が無い")
         self.assertEqual(self.consts.get("_NAMESPACE"), theirs,
-                         "NAMESPACE が install.py とパッケージで食い違っている")
+                         "NAMESPACE がハブとパッケージで食い違っている")
 
     def test_installer_defines_dropped_hook(self):
         tree, _ = _parse(self.installer)
