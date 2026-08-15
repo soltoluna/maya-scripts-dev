@@ -85,6 +85,33 @@ def _imported_roots(path):
     return roots
 
 
+def _optionvar_literals(path):
+    """`cmds.optionVar(...)` に直接渡されている文字列キーを集める。
+
+    `sv=("key", value)` の形はタプルの**先頭だけ**がキー。 2 番目まで見ると
+    値のほうを誤検出する。 定数を組み立てて渡している形は追わない。
+    """
+    tree, _ = _parse(path)
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not (isinstance(node.func, ast.Attribute)
+                and node.func.attr == "optionVar"):
+            continue
+        keys = []
+        for operand in list(node.args) + [kw.value for kw in node.keywords]:
+            if isinstance(operand, (ast.Tuple, ast.List)):
+                if operand.elts:
+                    keys.append(operand.elts[0])
+            else:
+                keys.append(operand)
+        for operand in keys:
+            if isinstance(operand, ast.Constant) and isinstance(operand.value, str):
+                found.append(operand.value)
+    return found
+
+
 def _read_doc(name):
     path = _bootstrap.TOOL_DIR / name
     return path.read_text(encoding="utf-8") if path.is_file() else None
@@ -176,6 +203,18 @@ class InstallerCase(unittest.TestCase):
                 self.consts.get(key), theirs.get(key),
                 "%s が install.py と dev_tools.py で食い違っている" % (key,))
 
+    def test_namespace_agrees_with_package(self):
+        """install.py の `_NAMESPACE` とパッケージの `NAMESPACE` は同じ値。
+
+        ずれると `_close_existing_window()` が別名のウィンドウを探すので、
+        更新後に古いウィンドウが residual として残る。
+        """
+        init_py = _bootstrap.PACKAGE_DIR / "__init__.py"
+        theirs = _module_constants(init_py).get("NAMESPACE")
+        self.assertIsNotNone(theirs, "__init__.py に NAMESPACE が無い")
+        self.assertEqual(self.consts.get("_NAMESPACE"), theirs,
+                         "NAMESPACE が install.py とパッケージで食い違っている")
+
     def test_installer_defines_dropped_hook(self):
         tree, _ = _parse(self.installer)
         names = {n.name for n in ast.walk(tree)
@@ -194,9 +233,27 @@ class LayoutCase(unittest.TestCase):
             self.skipTest("ui.py が無い")
         module = _bootstrap.import_tool()
         window = getattr(module.ui, "WINDOW", None)
-        self.assertEqual(window, _bootstrap.PACKAGE_NAME + "Win",
-                         "ウィンドウ名は <モジュール名>Win にする "
+        expected = "%s_%sWin" % (module.NAMESPACE, _bootstrap.PACKAGE_NAME)
+        self.assertEqual(window, expected,
+                         "ウィンドウ名は <NAMESPACE>_<モジュール名>Win にする "
                          "（install.py が古いウィンドウを閉じられなくなる）")
+
+    def test_runtime_identifiers_are_namespaced(self):
+        """optionVar / scriptJob は Maya 全体で 1 つの空間を共有する。
+
+        接頭辞の無いキーは他人のツールと**後勝ちで静かに衝突する**ので、
+        `<NAMESPACE>_<モジュール名>` で始まっていることを機械で確かめる。
+        """
+        module = _bootstrap.import_tool()
+        prefix = "%s_%s" % (module.NAMESPACE, _bootstrap.PACKAGE_NAME)
+        for path in _bootstrap.tool_source_files():
+            for key in _optionvar_literals(path):
+                with self.subTest(key=key):
+                    self.assertTrue(
+                        key.startswith(prefix),
+                        "optionVar のキー %r が名前空間に入っていない。 "
+                        "%r で始めるか `_NS` から組み立てる（%s）"
+                        % (key, prefix + "_", path.name))
 
     def test_core_does_not_import_maya(self):
         core = _bootstrap.PACKAGE_DIR / "core.py"

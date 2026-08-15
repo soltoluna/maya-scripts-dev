@@ -98,44 +98,51 @@ Maya 用 Python ツールを**自宅（Maya 無し）で開発し、GitHub 経�
 
 ## ルール
 
-### 個人の接頭辞は付けない。名前空間はモジュール名で切る
+### 名前空間 — ツール名には付けない、実行時識別子には必ず付ける
 
-**`ntk_` のような個人の接頭辞は使わない**（2026-08-15 決定）。 社内配布する
-可能性が高く、配る相手から見て個人名の名前空間は意味を持たないため。
-ツール名はそのまま機能を表す名前にする（`playblast_tool` / `constraint_inspector`）。
+**この 2 つを混同しないこと。** 同じ `ntk` でも、付ける場所によって意味が違う。
 
-ただし **Maya のグローバル名前空間が浅い**という問題は消えない。 シェルフ・
-optionVar・scriptJob・ウィンドウ名はすべてフラットな 1 つの空間を共有していて、
-`lastTarget` のような汎用名は**後勝ちで静かに上書きされる**。 社内で他人のツールと
-同居するなら、むしろ危険は増える。
+| | 接頭辞 | 理由 |
+|---|---|---|
+| **ツール名**（フォルダ名・モジュール名・表示名・シェルフラベル） | **付けない** | 社内配布する。 配る相手から見て個人名の名前空間は意味を持たない |
+| **実行時識別子**（optionVar / scriptJob / ウィンドウ名） | **必ず付ける** | Maya 全体で 1 つのフラットな空間を共有する。 他人のツールと**後勝ちで静かに衝突する** |
 
-そこで **名前空間は「モジュール名そのもの」で切る**。 別に接頭辞を決めない。
+前者は人が読む名前、後者は Maya の内部でぶつからないための札。 札のほうは
+むしろ社内配布で危険が増すので、`ntk` を積極的に使う。
 
 | 対象 | 形 | 例 |
 |---|---|---|
 | パッケージ / モジュール名 | 機能を表す snake_case | `rename_helper` |
-| ウィンドウ名 | `<モジュール名>Win` | `rename_helperWin` |
-| optionVar キー | `<モジュール名>_<key>` | `rename_helper_last_target` |
-| scriptJob / callback の識別子 | `<モジュール名>_<用途>` | `rename_helper_selection_job` |
+| 表示名（ウィンドウタイトル） | 自然な英語 | `Rename Helper` |
 | シェルフボタン label | 10 文字以内の短縮名 | `RenameHlp` |
+| ウィンドウ名 | `<NAMESPACE>_<モジュール名>Win` | `ntk_rename_helperWin` |
+| optionVar キー | `<NAMESPACE>_<モジュール名>_<key>` | `ntk_rename_helper_last_target` |
+| scriptJob / callback の識別子 | `<NAMESPACE>_<モジュール名>_<用途>` | `ntk_rename_helper_selection_job` |
 
-- **接頭辞は手で書かず `__package__` から導く**（雛形の `ui.py` / `dev_tools.py` が
-  そうしてある）。 定数で持つとリネームでずれ、付け忘れも起きる:
-  ```python
-  _PACKAGE = __package__ or __name__.rsplit(".", 1)[0]
-  WINDOW = _PACKAGE + "Win"
-  _OPTVAR_LAST_TARGET = "%s_last_target" % _PACKAGE
-  ```
-- **ウィンドウ名は `モジュール名 + "Win"` から動かさない。** `install.py` の
-  `_close_existing_window()` がこの規則で既存ウィンドウを探すので、外すと更新時に
-  古いウィンドウが残る（`check_tools.py` が検査する）
+**`NAMESPACE` は 1 箇所で定義して組み立てる。** 直書きすると付け忘れとリネーム漏れが
+必ず起きるので、雛形は次の形にしてある:
+
+```python
+# <pkg>/__init__.py
+NAMESPACE = "ntk"
+
+# <pkg>/ui.py
+from . import NAMESPACE
+_PACKAGE = __package__ or __name__.rsplit(".", 1)[0]
+_NS = "%s_%s" % (NAMESPACE, _PACKAGE)     # ntk_rename_helper
+WINDOW = _NS + "Win"
+_OPTVAR_LAST_TARGET = _NS + "_last_target"
+```
+
+- **`install.py` の `_NAMESPACE` は `__init__.py` の `NAMESPACE` と同じ値にする。**
+  `_close_existing_window()` がこの規則でウィンドウを探すので、ずれると更新後に
+  古いウィンドウが残る（`check_tools.py` とテストが突き合わせる）
 - **モジュール名 = フォルダ名 = `install.py` の `_MODULE` = `_REPO_SUBDIR`。**
   この 4 つがずれるのが最頻の事故（`check_tools.py` が検査する）
-- `check_tools.py` は optionVar のリテラルキーがモジュール名で始まるかを検査する
-
-**チーム共通の接頭辞（`ars_` などスタジオ名）が必要になったら方針を変える。**
-その場合は上の表の「モジュール名」を「`<接頭辞>_<モジュール名>`」に読み替え、
-`check_tools.py` の optionVar 検査を 1 行直せば済む。 現時点では不要と判断。
+- `check_tools.py` とテストは、optionVar のリテラルキーが `<NAMESPACE>_<モジュール名>`
+  で始まるかを検査する。 `lastTarget` のような汎用名を書いた時点で止まる
+- **チームで別の札に変えるなら `NAMESPACE` と `_NAMESPACE` の 2 箇所だけ**
+  （`ars` など）。 それ以外は組み立てなので自動で追従する
 
 ### バージョン
 

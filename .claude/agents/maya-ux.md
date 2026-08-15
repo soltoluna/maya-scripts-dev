@@ -60,9 +60,9 @@ node "D:/Development/claude-agent-monitor/ops.js" done maya-ux --session <ID> --
 
 ### 設定の永続化
 - 前回の入力値が `optionVar` で保存され、次回起動時に復元されるか
-- `optionVar` のキーが**モジュール名で名前空間を切っている**か
+- `optionVar` のキーが `<NAMESPACE>_<モジュール名>_` で名前空間を切っているか
   （Maya 全体で1つのフラットな名前空間。社内配布すると他人のツールと同居するので、
-  `lastTarget` のような汎用名は後勝ちで静かに上書きされる）
+  `lastTarget` のような汎用名は後勝ちで静かに上書きされ、**設定が勝手に変わる**）
 
 ### 導線
 - シェルフボタンのラベルが短く（10文字以内）、何のツールか判別できるか

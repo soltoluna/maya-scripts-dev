@@ -254,6 +254,16 @@ def check_tool(tool_dir, readme_rows):
         report.error("パッケージ直下に show() が無い"
                      "（シェルフボタンの起動コマンドが呼ぶ入口）")
 
+    # --- 実行時識別子の名前空間 ---------------------------------------------
+    # optionVar / scriptJob / ウィンドウ名は Maya 全体で 1 つの空間を共有する。
+    # ツール名には接頭辞を付けない方針だが、**この 3 つには必ず付ける**。
+    # install.py の検査より先に解決しておく（あちらが参照する）
+    namespace = consts.get("NAMESPACE")
+    if namespace is None:
+        report.warn("__init__.py に NAMESPACE が無い"
+                    "（optionVar / scriptJob / ウィンドウ名の衝突回避に使う）")
+    ns_prefix = "%s_%s" % (namespace, name) if namespace else name
+
     # --- Python バージョン --------------------------------------------------
     sources = _package_sources(pkg_dir)
     installer = tool_dir / "install.py"
@@ -313,6 +323,12 @@ def check_tool(tool_dir, readme_rows):
                     report.error("%s が install.py と dev_tools.py で食い違う: "
                                  "%r != %r" % (key, icons.get(key), dcons.get(key)))
 
+        # NAMESPACE がずれると、更新時に別名のウィンドウを探して閉じ損なう
+        if namespace is not None and icons.get("_NAMESPACE") != namespace:
+            report.error("NAMESPACE が install.py (%r) とパッケージ (%r) で"
+                         "食い違う（更新後に古いウィンドウが残る）"
+                         % (icons.get("_NAMESPACE"), namespace))
+
     # --- レイヤ分離と命名 ---------------------------------------------------
     core_py = pkg_dir / "core.py"
     if not core_py.is_file():
@@ -324,24 +340,27 @@ def check_tool(tool_dir, readme_rows):
 
     for path in sources:
         for key in _optionvar_literals(path):
-            if not key.startswith(name):
-                report.warn("optionVar のキーがモジュール名で名前空間を切っていない: "
-                            "%r (%s)。 %r で始めるか `\"%%s_...\" %% _PACKAGE` で組み立てる"
-                            "（Maya 全体で共有される名前空間なので、社内の他ツールと"
+            if not key.startswith(ns_prefix):
+                report.warn("optionVar のキーが名前空間に入っていない: %r (%s)。 "
+                            "%r で始めるか `_NS` から組み立てる"
+                            "（Maya 全体で共有される空間なので、社内の他ツールと"
                             "後勝ちで衝突する）"
-                            % (key, path.relative_to(tool_dir).as_posix(), name + "_"))
+                            % (key, path.relative_to(tool_dir).as_posix(),
+                               ns_prefix + "_"))
 
     ui_py = pkg_dir / "ui.py"
     if ui_py.is_file():
         ucons = _module_constants(ui_py)
         window = ucons.get("WINDOW")
         source = _read(ui_py) or ""
-        derived = "WINDOW = _PACKAGE" in source or "WINDOW = __package__" in source
-        if window is not None and window != name + "Win":
+        derived = "WINDOW = _NS" in source
+        expected = ns_prefix + "Win"
+        if window is not None and window != expected:
             report.warn("ui.py の WINDOW は %r にする（install.py が古い"
-                        "ウィンドウを閉じられない）: %r" % (name + "Win", window))
+                        "ウィンドウを閉じられない）: %r" % (expected, window))
         elif window is None and not derived:
-            report.warn("ui.py に WINDOW が見当たらない")
+            report.warn("ui.py に WINDOW が見当たらない"
+                        "（`WINDOW = _NS + \"Win\"` で組み立てる）")
 
     # --- ドキュメント -------------------------------------------------------
     spec = tool_dir / "SPEC.md"

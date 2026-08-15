@@ -12,7 +12,7 @@
 
 | 項目 | 例 | 決め方 |
 |---|---|---|
-| フォルダ名 / モジュール名 | `rename_helper` | 引数の snake_case。**個人の接頭辞（`ntk_` 等）は付けない**（社内配布する方針。CLAUDE.md「ルール」） |
+| フォルダ名 / モジュール名 | `rename_helper` | 引数の snake_case。**ツール名に `ntk_` は付けない**（社内配布するため。ただし optionVar / ウィンドウ名には付ける。CLAUDE.md「ルール」） |
 | 表示名 | `Rename Helper` | ウィンドウタイトルとドキュメントの見出しに使う |
 | シェルフボタン ラベル | `RenameHlp` | **10 文字以内**。シェルフは幅が狭い |
 | カテゴリ | `Rigging` | `Modeling` / `Rigging` / `Animation` / `Lighting` / `Pipeline` / `Utility` など |
@@ -38,8 +38,13 @@ Rename-Item <name>\tool_template <name>
 2. `Tool Template` → `<表示名>`
 3. `ToolTmpl` → `<シェルフボタン ラベル>`
 
-**手で決める接頭辞は無い。** optionVar キーもウィンドウ名も `__package__` から
-導いてあるので、モジュール名さえ置換すれば自動で追従する（CLAUDE.md「ルール」）。
+**置換のほかに手で決めるものは無い。** optionVar キーもウィンドウ名も
+`NAMESPACE`（`__init__.py`）と `__package__` から組み立ててあるので、モジュール名を
+置換すれば `ntk_<name>Win` / `ntk_<name>_<key>` が自動で揃う。
+
+**`NAMESPACE` と `install.py` の `_NAMESPACE` は雛形の `"ntk"` のまま触らない。**
+ツール名には付けないが、Maya のフラットな名前空間（optionVar / scriptJob /
+ウィンドウ名）で他人のツールと衝突しないために必要（CLAUDE.md「ルール」）。
 
 続けて手で直す箇所:
 

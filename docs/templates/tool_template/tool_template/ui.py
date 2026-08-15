@@ -12,21 +12,24 @@ from __future__ import annotations
 
 from maya import cmds
 
-from . import __version__, core, dev_tools
+from . import NAMESPACE, __version__, core, dev_tools
 
 
-# ウィンドウ名は `<モジュール名>Win` 固定。 install.py の
-# `_close_existing_window()` がこの規則で古いウィンドウを探すので、
-# 定数で書かず自分の位置から導く（リネームしてもずれない）
+# Maya の optionVar / scriptJob / ウィンドウ名はフラットな 1 つの名前空間を
+# 共有する。 `lastTarget` のような汎用名は他人のツールと**後勝ちで静かに
+# 衝突する**ので、この 3 つには必ず `<NAMESPACE>_<モジュール名>` を付ける。
+#
+# 定数で直書きせず組み立てるのは、リネームしたときにずれないため。
+# 付け忘れも起きない（`_NS` を使う限り必ず名前空間に入る）。
 _PACKAGE = __package__ or __name__.rsplit(".", 1)[0]
-WINDOW = _PACKAGE + "Win"
+_NS = "%s_%s" % (NAMESPACE, _PACKAGE)          # 例: ntk_tool_template
 
-# optionVar / scriptJob / ウィンドウ名は Maya 全体で 1 つのフラットな
-# 名前空間を共有する。 **モジュール名を接頭辞にして必ず名前空間を切る**
-# （社内で他の人のツールと同居するので、`lastTarget` のような汎用名は
-# 後勝ちで静かに上書きされる）。 定数で書かず `_PACKAGE` から導けば、
-# リネームしても自動で追従し、付け忘れも起きない
-_OPTVAR_BASE_NAME = "%s_base_name" % _PACKAGE
+# ウィンドウ名は `<NAMESPACE>_<モジュール名>Win` 固定。 install.py の
+# `_close_existing_window()` が同じ規則で古いウィンドウを探すので、外すと
+# 更新後に古いウィンドウが残る
+WINDOW = _NS + "Win"
+
+_OPTVAR_BASE_NAME = _NS + "_base_name"         # 例: ntk_tool_template_base_name
 
 _CTRL = {}   # コントロール名の控え。 show() のたびに作り直す
 

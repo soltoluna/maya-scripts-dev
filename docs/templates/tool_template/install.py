@@ -47,6 +47,13 @@ _GITHUB_BRANCH = "main"
 _REPO_SUBDIR = "tool_template"
 
 _MODULE = "tool_template"           # パッケージ名（= フォルダ名）
+
+# optionVar / scriptJob / ウィンドウ名の衝突回避に使う接頭辞。
+# **パッケージの `__init__.py` の `NAMESPACE` と同じ値にする**
+# （ずれると更新時に古いウィンドウを閉じられない。`check_tools.py` が検査する）。
+# ツール名には付けない — ここは Maya の内部でぶつからないための札
+_NAMESPACE = "ntk"
+
 _SHELF_BUTTON_LABEL = "ToolTmpl"        # シェルフに出す短い名前（10 文字以内）
 
 # ダウンロード対象。 **新しい .py を足したら必ずここにも追記する。**
@@ -61,7 +68,7 @@ _REMOTE_FILES = (
 # ─── END CUSTOMIZE ────────────────────────────────────────────────────────
 
 
-_WINDOW = _MODULE + "Win"
+_WINDOW = "%s_%sWin" % (_NAMESPACE, _MODULE)   # ui.py の WINDOW と同じ規則
 _GITHUB_API = "https://api.github.com/repos/%s/%s" % (_GITHUB_OWNER, _GITHUB_REPO)
 _GITHUB_RAW = "https://raw.githubusercontent.com/%s/%s" % (_GITHUB_OWNER, _GITHUB_REPO)
 
@@ -274,7 +281,7 @@ def _read_installed_version(dest_root):
 def _close_existing_window():
     """更新前に開いているウィンドウを閉じる。
 
-    ウィンドウ名は `<モジュール名>Win` 固定（CLAUDE.md の命名規則）。
+    ウィンドウ名は `<NAMESPACE>_<モジュール名>Win` 固定（CLAUDE.md の命名規則）。
     ここを外すと更新後に古いウィンドウが残る。
     """
     try:

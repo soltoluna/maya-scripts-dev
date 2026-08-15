@@ -53,6 +53,8 @@ node "D:/Development/claude-agent-monitor/ops.js" done maya-distribution --sessi
 - `_REPO_SUBDIR` がモノレポ内の正しいフォルダを指しているか
 - `install.py` と `dev_tools.py` の GitHub 座標（owner / repo / branch / subdir）が
   同一値か。**食い違うと更新が別の場所を見に行く**
+- `install.py` の `_NAMESPACE` とパッケージの `NAMESPACE` が同一値か。
+  **ずれると更新時に別名のウィンドウを探すので、古いウィンドウが閉じられず残る**
 
 ### キャッシュ回避（気づきにくい事故）
 - **取得 URL に commit SHA が入っているか。** ブランチ名の URL
