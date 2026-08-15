@@ -296,9 +296,9 @@ class _MayaCmdsStub(types.ModuleType):
         CALLS.append(("about", (), kwargs))
         kw = _canonical(kwargs)
         if kw.get("version"):
-            return "2023"
+            return "2024"
         if kw.get("apiVersion"):
-            return 20230000
+            return 20240000
         return ""
 
     # -- 汎用フォールバック --------------------------------------------------

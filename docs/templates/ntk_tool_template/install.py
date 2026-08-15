@@ -39,7 +39,7 @@ import sys
 
 # ─── CUSTOMIZE ────────────────────────────────────────────────────────────
 _GITHUB_OWNER = "soltoluna"
-_GITHUB_REPO = "maya-tools"
+_GITHUB_REPO = "maya-scripts-dev"
 _GITHUB_BRANCH = "main"
 
 # モノレポなので、リポジトリ内のツールフォルダ名を指定する。

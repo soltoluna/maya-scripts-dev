@@ -17,7 +17,7 @@
 | prefix | `rnh` | optionVar / scriptJob の名前に使う短縮形（3〜4文字） |
 | シェルフボタン ラベル | `RenameHlp` | **10 文字以内**。シェルフは幅が狭い |
 | カテゴリ | `Rigging` | `Modeling` / `Rigging` / `Animation` / `Lighting` / `Pipeline` / `Utility` など |
-| 対応Maya | `2023` | **CLAUDE.md「環境」の値で固定。聞かない** |
+| 対応Maya | `2024` | **CLAUDE.md「環境」の値で固定。聞かない** |
 | 機能概要 | 1〜2行 | `SPEC.md` / `README.md` の「概要」とルート README に使う |
 
 **構成は常にパッケージ**（`ntk_<name>/ntk_<name>/__init__.py`）。単一ファイル構成は

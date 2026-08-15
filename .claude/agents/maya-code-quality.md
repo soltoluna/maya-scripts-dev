@@ -61,7 +61,8 @@ node "D:/Development/claude-agent-monitor/ops.js" done maya-code-quality --sessi
   「なぜそうしているか」が書かれているか**
 - コメントがコードの言い換えになっていないか
 - 型ヒントを使うなら `from __future__ import annotations` があるか
-  （Maya 2023 は Python 3.9。`int | None` は実行時に評価されると落ちる）
+  （下限の Maya 2024 は Python 3.10。`int | None` は 3.10 で書けるが、
+  下限を下げたときに壊れるので `from __future__` を付けておく）
 
 ### Python バージョン
 - Maya の Python バージョン（CLAUDE.md「環境」の値）で動く構文か

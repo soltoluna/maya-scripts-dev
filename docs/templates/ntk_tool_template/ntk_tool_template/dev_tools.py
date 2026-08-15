@@ -27,7 +27,7 @@ from . import __version__
 # ─── CUSTOMIZE ────────────────────────────────────────────────────────────
 # install.py と同じ値にする（`tools/check_tools.py` が突き合わせる）
 _GITHUB_OWNER = "soltoluna"
-_GITHUB_REPO = "maya-tools"
+_GITHUB_REPO = "maya-scripts-dev"
 _GITHUB_BRANCH = "main"
 _REPO_SUBDIR = "ntk_tool_template"   # モノレポ内のツールフォルダ名。 単独リポジトリなら ""
 # ─── END CUSTOMIZE ────────────────────────────────────────────────────────

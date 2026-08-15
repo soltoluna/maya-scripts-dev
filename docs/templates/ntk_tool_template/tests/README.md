@@ -10,7 +10,7 @@ cd D:\maya\scripts\dev\ntk_tool_template\tests
 python -m unittest discover -v
 ```
 
-Maya のインストールは不要（Python 3.9+ の標準ライブラリのみ）。
+Maya のインストールは不要（Python 3.10+ の標準ライブラリのみ）。
 
 ## 構成
 
@@ -20,7 +20,7 @@ Maya のインストールは不要（Python 3.9+ の標準ライブラリのみ
   scriptJob を記録するので、後片付けの検証に使える
 - `test_tool_meta.py` — ツール非依存のメタテスト。 バージョンの 3 箇所同期、
   **`install.py` の `_REMOTE_FILES` とパッケージの実体の一致**、GitHub 座標の
-  一致、ウィンドウ名の規約、Python 3.9 構文、`show()` の一往復
+  一致、ウィンドウ名の規約、Python 3.10 構文、`show()` の一往復
 
 ## 担保しているもの・していないもの
 

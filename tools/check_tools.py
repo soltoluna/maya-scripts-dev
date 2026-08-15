@@ -37,7 +37,7 @@ ERROR（放置すると実機で壊れるもの）
   実機だけで `ModuleNotFoundError` になる）
 - `install.py` と `dev_tools.py` の GitHub 座標が一致
 - パッケージ直下に `show()` がある（シェルフボタンの入口）
-- すべての `.py` が Python 3.9 の構文で解析できる（Maya 2023）
+- すべての `.py` が Python 3.10 の構文で解析できる（Maya 2024 = 下限）
 - `SPEC.md` がある / 「概要」のバージョンが `__version__` と一致
 - `README.md` があればバージョンが一致
 - ルート `README.md` の一覧表に行がある / バージョンが一致
@@ -63,7 +63,7 @@ import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 TOOL_GLOB = "ntk_*"
-TARGET_PYTHON = (3, 9)          # Maya 2023。 CLAUDE.md「環境」と揃える
+TARGET_PYTHON = (3, 10)         # Maya 2024（下限）。 CLAUDE.md「環境」と揃える
 PLACEHOLDERS = ("YOUR_GITHUB_USERNAME", "YOUR_REPO_NAME", "OWNER", "REPO")
 
 _SEMVER = re.compile(r"^\d+\.\d+\.\d+$")

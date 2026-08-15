@@ -17,13 +17,14 @@
   スラッシュコマンド 5 本、レビュー用サブエージェント 6 本。 手元の
   `maya-hot-update-patterns.md` を `docs/MAYA_HOT_UPDATE_PATTERNS.md` として取り込み、
   その §1-10（`_REMOTE_FILES` の追記忘れ）を**テストと checker で機械検出**にした。
-- 現状: 雛形のテスト 17 件パス。 **GitHub リポジトリは未作成**（`soltoluna/maya-tools` を
-  想定して定数を入れてある）。 ツールはまだ 1 本も無い。 **実機（会社の Maya）での
-  ドラッグ&ドロップは未検証** — この一連の仕組みが実機で通るかはまだ誰も見ていない。
-- 次回: (1) GitHub に `maya-tools` を作って push、(2) `/new-tool` で最初のツールを 1 本作る、
-  (3) **会社の Maya で install.py のドラッグ&ドロップと「GitHub から更新」を通す**。
-  ここが通るまでは全部が机上。
-- メモ: 対応 Maya は **2023 / Python 3.9 を仮置き**（`maya-hot-update-patterns.md` の
-  前提に合わせた）。 会社の Maya が違うなら CLAUDE.md の「環境」と
-  `tools/check_tools.py` の `TARGET_PYTHON`、テストの `_TARGET_PYTHON` を直す。
-  2025 以降は Qt が PySide6 になるが、雛形は `cmds` だけで書いてあるので影響しない。
+- 現状: 雛形のテスト 17 件パス、`check_tools.py` 0 error。 リポジトリは
+  `soltoluna/maya-scripts-dev`（**public**）。 ツールはまだ 1 本も無い。
+  **実機（会社の Maya）での検証はゼロ** — ドラッグ&ドロップも更新ボタンも、
+  この仕組みが実機で通るかはまだ誰も見ていない。
+- 次回: (1) `/new-tool` で最初のツールを 1 本作る、(2) **会社の Maya（2024 か 2025）で
+  install.py のドラッグ&ドロップと「GitHub から更新」を通す**。 ここが通るまでは全部が机上。
+- メモ: 対応 Maya は **2024 / 2025 の両対応**で、判断は下限の 2024（Python 3.10）に
+  合わせる。 **PySide は使わない方針** — 2024=PySide2 / 2025=PySide6 で import 名から
+  互換が無く、`cmds` なら 1 本のコードが両方で動くため。 public にしたのは
+  `install.py` の更新機能が GitHub を**匿名で**叩く設計だから（private だと会社 PC 側に
+  トークンを置く仕組みが要る）。

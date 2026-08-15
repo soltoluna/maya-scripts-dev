@@ -16,7 +16,8 @@
 4. ウィンドウ名が `<モジュール名>Win`（`install.py` の `_close_existing_window`
    がこの規則で古いウィンドウを閉じる）
 5. `core.py` が `maya` を import していない（自宅でテストできる範囲を守る）
-6. すべての `.py` が **Python 3.9 の構文**で解析できる（Maya 2023 の Python）
+6. すべての `.py` が **Python 3.10 の構文**で解析できる（Maya 2024 の Python。
+   2025 は 3.11 なので、下限の 2024 に合わせておけば両方で動く）
 7. import から `show()` までを一往復させて、ウィンドウが生成され、undo チャンクが
    閉じられ、`deleteUI` で後片付けできる
 
@@ -44,7 +45,7 @@ _SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 _DOC_VERSION_LINE = re.compile(r"^-\s*バージョン:\s*(\d+(?:\.\d+)*)", re.M)
 _CHANGELOG_HEADING = re.compile(r"^##\s*(\d+\.\d+\.\d+)", re.M)
 
-_TARGET_PYTHON = (3, 9)   # Maya 2023。 CLAUDE.md「環境」と揃える
+_TARGET_PYTHON = (3, 10)   # Maya 2024（下限）。 CLAUDE.md「環境」と揃える
 
 
 # --- 静的解析のヘルパー ------------------------------------------------------
