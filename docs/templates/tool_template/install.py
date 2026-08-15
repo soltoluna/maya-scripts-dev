@@ -44,9 +44,9 @@ _GITHUB_BRANCH = "main"
 
 # モノレポなので、リポジトリ内のツールフォルダ名を指定する。
 # ツール 1 本 = 1 リポジトリにする場合は "" にする。
-_REPO_SUBDIR = "ntk_tool_template"
+_REPO_SUBDIR = "tool_template"
 
-_MODULE = "ntk_tool_template"           # パッケージ名（= フォルダ名）
+_MODULE = "tool_template"           # パッケージ名（= フォルダ名）
 _SHELF_BUTTON_LABEL = "ToolTmpl"        # シェルフに出す短い名前（10 文字以内）
 
 # ダウンロード対象。 **新しい .py を足したら必ずここにも追記する。**

@@ -43,11 +43,12 @@ Maya 用 Python ツールを**自宅（Maya 無し）で開発し、GitHub 経�
 
 ## フォルダ構造
 
-### 既存スクリプト（`ntk_` が付かないフォルダ）
+### 既存スクリプト（標準セット化前のフォルダ）
 
 `ConstrainInspector` / `PlayblastTool` / `toon_outline_manager` などは、
 標準セット化する前から使っている**単体スクリプト**。 `install.py` もテストも
-無く、`tools/check_tools.py` の対象外（`ntk_*` だけを見る）。 手を入れるときは
+無く、`tools/check_tools.py` の対象外（**`install.py` か同名パッケージがある
+フォルダだけ**を検査する。 名前で判別しないのは接頭辞を付けない方針のため）。 手を入れるときは
 `/scaffold` で標準セットに載せてから触る。
 
 **そのうち 3 本（`ConstrainInspector` / `MgearToDWpicker` / `toon_outline_manager`）は
@@ -62,9 +63,9 @@ Maya 用 Python ツールを**自宅（Maya 無し）で開発し、GitHub 経�
 パッケージの一部にしてはいけない）。
 
 ```
-ntk_<name>/
+<tool_name>/
 ├── install.py            エンドユーザーが唯一触るファイル（Maya にドラッグ）
-├── ntk_<name>/           実装本体（Maya の userScriptDir にこの形で配置される）
+├── <tool_name>/          実装本体（Maya の userScriptDir にこの形で配置される）
 │   ├── __init__.py       __version__ と show() をここに置く
 │   ├── core.py           Maya 非依存の純ロジック（← 自宅でテストできるのはここ）
 │   ├── ui.py             cmds による UI。 ロジックを持たない
@@ -97,24 +98,44 @@ ntk_<name>/
 
 ## ルール
 
-### 名前空間は `ntk` に揃える
+### 個人の接頭辞は付けない。名前空間はモジュール名で切る
 
-Maya はグローバル名前空間が浅い（シェルフ / optionVar / scriptJob / ウィンドウ名が
-すべてフラット）ので、接頭辞が無いと他社ツールや Maya 本体と**静かに衝突する**。
+**`ntk_` のような個人の接頭辞は使わない**（2026-08-15 決定）。 社内配布する
+可能性が高く、配る相手から見て個人名の名前空間は意味を持たないため。
+ツール名はそのまま機能を表す名前にする（`playblast_tool` / `constraint_inspector`）。
+
+ただし **Maya のグローバル名前空間が浅い**という問題は消えない。 シェルフ・
+optionVar・scriptJob・ウィンドウ名はすべてフラットな 1 つの空間を共有していて、
+`lastTarget` のような汎用名は**後勝ちで静かに上書きされる**。 社内で他人のツールと
+同居するなら、むしろ危険は増える。
+
+そこで **名前空間は「モジュール名そのもの」で切る**。 別に接頭辞を決めない。
 
 | 対象 | 形 | 例 |
 |---|---|---|
-| パッケージ / モジュール名 | `ntk_<name>` | `ntk_rename_helper` |
-| ウィンドウ名 | `<モジュール名>Win` | `ntk_rename_helperWin` |
-| optionVar キー | `ntk_<prefix>_<key>` | `ntk_rnh_last_target` |
-| scriptJob / callback の識別子 | `ntk_<prefix>_<用途>` | `ntk_rnh_selection_job` |
+| パッケージ / モジュール名 | 機能を表す snake_case | `rename_helper` |
+| ウィンドウ名 | `<モジュール名>Win` | `rename_helperWin` |
+| optionVar キー | `<モジュール名>_<key>` | `rename_helper_last_target` |
+| scriptJob / callback の識別子 | `<モジュール名>_<用途>` | `rename_helper_selection_job` |
 | シェルフボタン label | 10 文字以内の短縮名 | `RenameHlp` |
 
+- **接頭辞は手で書かず `__package__` から導く**（雛形の `ui.py` / `dev_tools.py` が
+  そうしてある）。 定数で持つとリネームでずれ、付け忘れも起きる:
+  ```python
+  _PACKAGE = __package__ or __name__.rsplit(".", 1)[0]
+  WINDOW = _PACKAGE + "Win"
+  _OPTVAR_LAST_TARGET = "%s_last_target" % _PACKAGE
+  ```
 - **ウィンドウ名は `モジュール名 + "Win"` から動かさない。** `install.py` の
   `_close_existing_window()` がこの規則で既存ウィンドウを探すので、外すと更新時に
   古いウィンドウが残る（`check_tools.py` が検査する）
-- **モジュール名 = フォルダ名 = `install.py` の `_MODULE` = パッケージの `_PACKAGE`。**
+- **モジュール名 = フォルダ名 = `install.py` の `_MODULE` = `_REPO_SUBDIR`。**
   この 4 つがずれるのが最頻の事故（`check_tools.py` が検査する）
+- `check_tools.py` は optionVar のリテラルキーがモジュール名で始まるかを検査する
+
+**チーム共通の接頭辞（`ars_` などスタジオ名）が必要になったら方針を変える。**
+その場合は上の表の「モジュール名」を「`<接頭辞>_<モジュール名>`」に読み替え、
+`check_tools.py` の optionVar 検査を 1 行直せば済む。 現時点では不要と判断。
 
 ### バージョン
 
@@ -126,7 +147,7 @@ Maya はグローバル名前空間が浅い（シェルフ / optionVar / script
   - マイナー (x.**Y**.0): 機能追加、ウィンドウ名 / optionVar キーの変更
   - メジャー (**X**.0.0): 作り直し・大規模な仕様変更
   - ドキュメントのみの修正では上げない
-- **情報源は `ntk_<name>/ntk_<name>/__init__.py` の `__version__` ただ 1 つ。**
+- **情報源は `<tool>/<tool>/__init__.py` の `__version__` ただ 1 つ。**
   同期先は **3 箇所**: `SPEC.md` の「概要」 / ツールの `README.md` の「概要」 /
   ルート `README.md` の一覧表
 - バージョンを上げたら `SPEC.md` の `## 実装状況` に `### vX.Y.Z` を、`CHANGELOG.md` に
@@ -148,7 +169,7 @@ Maya はグローバル名前空間が浅い（シェルフ / optionVar / script
 ## ツール標準セット
 
 すべてのツールは以下を揃える。 定義と設計意図は [`docs/TOOL_SCAFFOLD.md`](docs/TOOL_SCAFFOLD.md)、
-雛形の実体は [`docs/templates/ntk_tool_template/`](docs/templates/) にある。
+雛形の実体は [`docs/templates/tool_template/`](docs/templates/) にある。
 
 | 資産 | 中身 |
 |---|---|
@@ -175,10 +196,10 @@ Maya はグローバル名前空間が浅い（シェルフ / optionVar / script
 
 ```powershell
 python tools\check_tools.py                    # 全ツール（ERROR があれば終了コード 1）
-python tools\check_tools.py ntk_rename_helper  # 指定したツールだけ
+python tools\check_tools.py rename_helper      # 指定したツールだけ
 python tools\check_tools.py --list-missing     # 標準セットの充足状況だけ
 
-cd ntk_rename_helper\tests
+cd rename_helper\tests
 python -m unittest discover -v                 # Maya 不要
 ```
 

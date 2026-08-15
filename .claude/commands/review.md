@@ -11,8 +11,8 @@
 
 引数の解釈:
 
-- **ファイルパス** (`ntk_rename_helper/ntk_rename_helper/ui.py`) → そのファイルのみ
-- **ツールフォルダ名** (`ntk_rename_helper`) → そのフォルダ内の `.py` 全部
+- **ファイルパス** (`rename_helper/rename_helper/ui.py`) → そのファイルのみ
+- **ツールフォルダ名** (`rename_helper`) → そのフォルダ内の `.py` 全部
   （`install.py` とパッケージ内の `.py`。`tests/` は除く）
 - **省略** → `git status --short` と `git diff --name-only HEAD` から、今セッションで
   変更した `.py` を対象にする。変更が無ければ直近コミット(`git log -1 --name-only`)で

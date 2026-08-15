@@ -45,7 +45,7 @@ git mv <ツール名>\<何か>.py <ツール名>\<ツール名>\__init__.py
 ### install.py
 
 ```powershell
-Copy-Item docs\templates\ntk_tool_template\install.py <ツール名>\install.py
+Copy-Item docs\templates\tool_template\install.py <ツール名>\install.py
 ```
 
 CUSTOMIZE ブロックを埋める。**`_REMOTE_FILES` はパッケージの `.py` を実際に
@@ -54,7 +54,7 @@ CUSTOMIZE ブロックを埋める。**`_REMOTE_FILES` はパッケージの `.p
 ### dev_tools.py（バージョン表示と「GitHub から更新」）
 
 ```powershell
-Copy-Item docs\templates\ntk_tool_template\ntk_tool_template\dev_tools.py <ツール名>\<ツール名>\dev_tools.py
+Copy-Item docs\templates\tool_template\tool_template\dev_tools.py <ツール名>\<ツール名>\dev_tools.py
 ```
 
 - CUSTOMIZE ブロックの GitHub 座標を `install.py` と**同一値**にする
@@ -68,7 +68,7 @@ Copy-Item docs\templates\ntk_tool_template\ntk_tool_template\dev_tools.py <ツ�
 ### tests/
 
 ```powershell
-Copy-Item -Recurse docs\templates\ntk_tool_template\tests <ツール名>\tests
+Copy-Item -Recurse docs\templates\tool_template\tests <ツール名>\tests
 ```
 
 `_bootstrap.py` と `test_tool_meta.py` はツール非依存なので**無編集で動く**。
@@ -87,7 +87,7 @@ python -m unittest discover -v
 
 ### README.md
 
-ツール本体を読み、`docs/templates/ntk_tool_template/README.md` の構成で書き起こす。
+ツール本体を読み、`docs/templates/tool_template/README.md` の構成で書き起こす。
 `## 概要`（`- バージョン: <__version__ と同じ> / 対応Maya: x+` の行を必ず入れる）/
 `## インストール` / `## 使い方` / `## 更新` / `## 制約・既知の問題` / `## 開発者向け`。
 
@@ -96,7 +96,7 @@ python -m unittest discover -v
 
 ### CHANGELOG.md
 
-`docs/templates/ntk_tool_template/CHANGELOG.md` の形。**過去の履歴をでっち上げない。**
+`docs/templates/tool_template/CHANGELOG.md` の形。**過去の履歴をでっち上げない。**
 現行バージョンの見出しを1つ立て、分かる範囲で「現行仕様」とだけ書く。
 
 ### SPEC.md（無い場合のみ）

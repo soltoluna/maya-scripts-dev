@@ -21,10 +21,12 @@ from . import __version__, core, dev_tools
 _PACKAGE = __package__ or __name__.rsplit(".", 1)[0]
 WINDOW = _PACKAGE + "Win"
 
-# optionVar と scriptJob は Maya 全体で 1 つのフラットな名前空間なので、
-# `ntk_<prefix>_` の接頭辞を必ず付ける（付けないと他社ツールと静かに衝突する）
-_PREFIX = "tmpl"
-_OPTVAR_BASE_NAME = "ntk_%s_base_name" % _PREFIX
+# optionVar / scriptJob / ウィンドウ名は Maya 全体で 1 つのフラットな
+# 名前空間を共有する。 **モジュール名を接頭辞にして必ず名前空間を切る**
+# （社内で他の人のツールと同居するので、`lastTarget` のような汎用名は
+# 後勝ちで静かに上書きされる）。 定数で書かず `_PACKAGE` から導けば、
+# リネームしても自動で追従し、付け忘れも起きない
+_OPTVAR_BASE_NAME = "%s_base_name" % _PACKAGE
 
 _CTRL = {}   # コントロール名の控え。 show() のたびに作り直す
 

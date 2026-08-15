@@ -148,7 +148,7 @@ class _MayaCmdsStub(types.ModuleType):
     `cmds.textFieldGrp(ctrl, q=True, text=True)` のような往復はそのまま通る。
     """
 
-    _ntk_stub = True
+    _maya_stub = True
 
     # -- 明示実装 ------------------------------------------------------------
 
@@ -354,7 +354,7 @@ def _first_query_flag(kw):
 
 def _build_maya():
     maya = types.ModuleType("maya")
-    maya._ntk_stub = True
+    maya._maya_stub = True
 
     cmds = _MayaCmdsStub("maya.cmds")
 
@@ -387,7 +387,7 @@ def _build_maya():
 
 
 def _install():
-    if "maya" in sys.modules and getattr(sys.modules["maya"], "_ntk_stub", False):
+    if "maya" in sys.modules and getattr(sys.modules["maya"], "_maya_stub", False):
         return  # 冪等
 
     maya = _build_maya()

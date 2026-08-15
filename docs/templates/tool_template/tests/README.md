@@ -6,7 +6,7 @@
 ## 実行方法
 
 ```powershell
-cd D:\maya\scripts\dev\ntk_tool_template\tests
+cd D:\maya\scripts\dev\tool_template\tests
 python -m unittest discover -v
 ```
 

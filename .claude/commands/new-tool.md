@@ -12,22 +12,21 @@
 
 | 項目 | 例 | 決め方 |
 |---|---|---|
-| フォルダ名 / モジュール名 | `ntk_rename_helper` | 引数の snake_case に `ntk_` を付ける |
+| フォルダ名 / モジュール名 | `rename_helper` | 引数の snake_case。**個人の接頭辞（`ntk_` 等）は付けない**（社内配布する方針。CLAUDE.md「ルール」） |
 | 表示名 | `Rename Helper` | ウィンドウタイトルとドキュメントの見出しに使う |
-| prefix | `rnh` | optionVar / scriptJob の名前に使う短縮形（3〜4文字） |
 | シェルフボタン ラベル | `RenameHlp` | **10 文字以内**。シェルフは幅が狭い |
 | カテゴリ | `Rigging` | `Modeling` / `Rigging` / `Animation` / `Lighting` / `Pipeline` / `Utility` など |
 | 対応Maya | `2024` | **CLAUDE.md「環境」の値で固定。聞かない** |
 | 機能概要 | 1〜2行 | `SPEC.md` / `README.md` の「概要」とルート README に使う |
 
-**構成は常にパッケージ**（`ntk_<name>/ntk_<name>/__init__.py`）。単一ファイル構成は
+**構成は常にパッケージ**（`<name>/<name>/__init__.py`）。単一ファイル構成は
 選ばない（`docs/TOOL_SCAFFOLD.md`「なぜパッケージ構成なのか」）。構成を聞く必要は無い。
 
 ## 2. 雛形をコピーする
 
 ```powershell
-Copy-Item -Recurse docs\templates\ntk_tool_template ntk_<name>
-Rename-Item ntk_<name>\ntk_tool_template ntk_<name>
+Copy-Item -Recurse docs\templates\tool_template <name>
+Rename-Item <name>\tool_template <name>
 ```
 
 ## 3. 置換する
@@ -35,14 +34,16 @@ Rename-Item ntk_<name>\ntk_tool_template ntk_<name>
 コピーした**すべてのファイル**（`install.py` / パッケージ内の `.py` / 3つの `.md` /
 `tests/README.md`）に対して、長いものから順に置換する。
 
-1. `ntk_tool_template` → `ntk_<name>`
+1. `tool_template` → `<name>`
 2. `Tool Template` → `<表示名>`
 3. `ToolTmpl` → `<シェルフボタン ラベル>`
-4. `tmpl` → `<prefix>`（`ui.py` の `_PREFIX`。optionVar / scriptJob の名前に使う）
+
+**手で決める接頭辞は無い。** optionVar キーもウィンドウ名も `__package__` から
+導いてあるので、モジュール名さえ置換すれば自動で追従する（CLAUDE.md「ルール」）。
 
 続けて手で直す箇所:
 
-- `install.py` の CUSTOMIZE ブロック — `_REPO_SUBDIR` と `_MODULE` が `ntk_<name>` に
+- `install.py` の CUSTOMIZE ブロック — `_REPO_SUBDIR` と `_MODULE` が `<name>` に
   なっていること、`_SHELF_BUTTON_LABEL` が確定した値であること
 - `<パッケージ>/dev_tools.py` の CUSTOMIZE ブロック — GitHub 座標を install.py と
   **同一値**にする（食い違うと更新が別の場所を見に行く）
@@ -64,10 +65,10 @@ Rename-Item ntk_<name>\ntk_tool_template ntk_<name>
 ## 5. 検証する
 
 ```powershell
-cd ntk_<name>\tests
+cd <name>\tests
 python -m unittest discover -v
 cd ..\..
-python tools\check_tools.py ntk_<name>
+python tools\check_tools.py <name>
 ```
 
 **tests が全件通り、check_tools が `0 error` になるまで直す。**
@@ -76,7 +77,7 @@ python tools\check_tools.py ntk_<name>
 ## 6. コミットして push する
 
 ```
-feat(ntk_<name>): 新規ツールを標準セット付きで作成 (v0.1.0)
+feat(<name>): 新規ツールを標準セット付きで作成 (v0.1.0)
 ```
 
 **push まで行う。** ローカルのコミットは実機から見えない（`install.py` は GitHub の

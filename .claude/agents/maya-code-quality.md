@@ -42,10 +42,13 @@ node "D:/Development/claude-agent-monitor/ops.js" done maya-code-quality --sessi
   集める → `core` に渡す → 結果を `cmds` に流す」に留める
 - `dev_tools.py` に手が入っていないか（全ツール共通なので触らない）
 
-### 命名（CLAUDE.md の `ntk` 規約）
-- モジュール名が `ntk_<name>`、ウィンドウ名が `<モジュール名>Win`
-- `optionVar` キーと `scriptJob` の識別子に `ntk_<prefix>_` が付いているか
-  （Maya はこれらがフラットな1つの名前空間なので、無いと他ツールと静かに衝突する）
+### 命名（CLAUDE.md の命名規約）
+- モジュール名が機能を表す snake_case、ウィンドウ名が `<モジュール名>Win`
+- **個人の接頭辞（`ntk_` 等）を付けていないか。** 社内配布する方針なので使わない
+- `optionVar` キーと `scriptJob` の識別子が**モジュール名で名前空間を切っている**か
+  （Maya はこれらがフラットな1つの名前空間なので、汎用名は他ツールと静かに衝突する）
+- **接頭辞を定数で持たず `__package__` から導いているか**
+  （`_PACKAGE = __package__ or __name__.rsplit(".", 1)[0]`）。手書きだとリネームでずれる
 - 関数・変数が snake_case、定数が UPPER_SNAKE
 - 非公開は先頭 `_`。モジュール外から呼ばれるものだけ公開名にする
 

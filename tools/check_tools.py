@@ -20,7 +20,7 @@ CLAUDE.md のルールのうち、機械的に確認できるものを自動化�
 
 ```powershell
 python tools\check_tools.py                    # 全ツール
-python tools\check_tools.py ntk_rename_helper  # 指定したツールだけ
+python tools\check_tools.py rename_helper      # 指定したツールだけ
 python tools\check_tools.py --list-missing     # 不足資産の一覧だけ出す
 python tools\check_tools.py --strict           # WARN も終了コード 1 にする
 ```
@@ -47,6 +47,8 @@ WARN（標準セットとして揃えたいもの）
 - `CHANGELOG.md` に現行バージョンの見出しがある
 - `core.py` があり、`maya` を import していない
 - `ui.py` の `WINDOW` が `<モジュール名>Win`
+- optionVar のキーがモジュール名で名前空間を切っている
+  （接頭辞を付けない方針なので、名前空間はモジュール名そのもので切る）
 - `SPEC.md` の「概要」に カテゴリ / 表示場所 の行がある
 - ルート `README.md` の カテゴリ / 対応Maya が一致
 - GitHub 座標がプレースホルダのまま残っていない
@@ -62,7 +64,12 @@ import sys
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-TOOL_GLOB = "ntk_*"
+
+# ツール名に接頭辞を付けない方針なので、フォルダ名では判別できない。
+# **標準セットの目印（install.py か同名パッケージ）があるものだけ**を
+# 対象にする。 目印が無いフォルダ＝標準セット化前の既存スクリプトで、
+# 検査対象外（消さずに一覧だけ出す）
+EXCLUDED_DIRS = {"docs", "tools"}
 TARGET_PYTHON = (3, 10)         # Maya 2024（下限）。 CLAUDE.md「環境」と揃える
 PLACEHOLDERS = ("YOUR_GITHUB_USERNAME", "YOUR_REPO_NAME", "OWNER", "REPO")
 
@@ -166,7 +173,7 @@ def _optionvar_literals(path):
     optionVar は Maya 全体で 1 つのフラットな名前空間なので、接頭辞の無い
     キーは他社ツールと静かに衝突する（後勝ちで値が入れ替わる）。
     定数を組み立てて渡している形は追わない — その場合は組み立て側で
-    `ntk_` を付けているのが通例で、追うと誤検出が増える。
+    モジュール名を接頭辞にしているのが通例で、追うと誤検出が増える。
     """
     source = _read(path)
     if source is None:
@@ -215,7 +222,7 @@ def _root_readme_rows():
         cells = [c.strip() for c in line.strip("|").split("|")]
         if not cells:
             continue
-        found = re.search(r"\]\((ntk_[^/)]+)/?\)", cells[0])
+        found = re.search(r"\]\(([A-Za-z0-9_.-]+)/\)", cells[0])
         if found:
             rows[found.group(1)] = cells
     return rows
@@ -317,10 +324,12 @@ def check_tool(tool_dir, readme_rows):
 
     for path in sources:
         for key in _optionvar_literals(path):
-            if not key.startswith("ntk_"):
-                report.warn("optionVar のキーに ntk_ 接頭辞が無い: %r (%s)"
-                            "（Maya 全体で共有される名前空間なので他ツールと衝突する）"
-                            % (key, path.relative_to(tool_dir).as_posix()))
+            if not key.startswith(name):
+                report.warn("optionVar のキーがモジュール名で名前空間を切っていない: "
+                            "%r (%s)。 %r で始めるか `\"%%s_...\" %% _PACKAGE` で組み立てる"
+                            "（Maya 全体で共有される名前空間なので、社内の他ツールと"
+                            "後勝ちで衝突する）"
+                            % (key, path.relative_to(tool_dir).as_posix(), name + "_"))
 
     ui_py = pkg_dir / "ui.py"
     if ui_py.is_file():
@@ -401,9 +410,38 @@ def check_tool(tool_dir, readme_rows):
 # 実行
 # --------------------------------------------------------------------------- #
 
+def _candidate_dirs():
+    return sorted(p for p in REPO_ROOT.iterdir()
+                  if p.is_dir()
+                  and not p.name.startswith(".")
+                  and p.name not in EXCLUDED_DIRS)
+
+
+def _has_standard_set(path):
+    """標準セットを適用済みか（`install.py` か同名パッケージがあるか）。"""
+    return (path / "install.py").is_file() or (path / path.name / "__init__.py").is_file()
+
+
 def discover_tools():
-    return sorted(p for p in REPO_ROOT.glob(TOOL_GLOB)
-                  if p.is_dir() and not p.name.startswith("."))
+    return [p for p in _candidate_dirs() if _has_standard_set(p)]
+
+
+def discover_legacy():
+    """標準セット化前の既存スクリプト（検査対象外）。"""
+    return [p for p in _candidate_dirs() if not _has_standard_set(p)]
+
+
+def _print_legacy(legacy):
+    """標準セット化前のフォルダを一覧するだけ（検査はしない）。
+
+    黙って無視すると存在ごと忘れられるので、毎回名前だけ出す。
+    """
+    if not legacy:
+        return
+    print("\n標準セット未適用（検査対象外・`/scaffold <名前>` で載せる）: %d 件"
+          % (len(legacy),))
+    for path in legacy:
+        print("  - %s" % (path.name,))
 
 
 def main(argv=None):
@@ -416,14 +454,18 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     tools = discover_tools()
+    legacy = discover_legacy()
+
     if args.tool:
         tools = [p for p in tools if p.name == args.tool]
         if not tools:
+            if any(p.name == args.tool for p in legacy):
+                print("%s は標準セット化前の既存スクリプトで、検査対象外。\n"
+                      "`/scaffold %s` で標準セットに載せてから検査できる。"
+                      % (args.tool, args.tool))
+                return 0
             print("ツールが見つからない: %s" % (args.tool,))
             return 2
-    if not tools:
-        print("ツールがまだ 1 つも無い（`/new-tool <名前>` で作る）。")
-        return 0
 
     readme_rows = _root_readme_rows()
     reports = [check_tool(p, readme_rows) for p in tools]
@@ -432,6 +474,12 @@ def main(argv=None):
         for report in reports:
             state = ", ".join(report.missing) if report.missing else "揃っている"
             print("%-32s %s" % (report.name, state))
+        _print_legacy(legacy)
+        return 0
+
+    if not reports:
+        print("標準セットを適用したツールはまだ無い（`/new-tool <名前>` で作る）。")
+        _print_legacy(legacy)
         return 0
 
     total_errors = total_warns = 0
@@ -447,6 +495,7 @@ def main(argv=None):
 
     print("\n%d tool(s): %d error, %d warn"
           % (len(reports), total_errors, total_warns))
+    _print_legacy(legacy)
     if total_errors:
         return 1
     if args.strict and total_warns:

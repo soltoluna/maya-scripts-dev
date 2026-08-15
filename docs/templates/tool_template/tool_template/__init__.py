@@ -3,9 +3,12 @@
 
 `/new-tool <名前>` でこのフォルダごとコピーし、以下を機械的に置換する:
 
-    ntk_tool_template  → ntk_<新しい名前>   （フォルダ名・モジュール名・ウィンドウ名）
-    tool_template      → <新しい prefix>     （optionVar キー・scriptJob 名）
-    Tool Template      → <新しい表示名>      （ウィンドウタイトル・ドキュメント）
+    tool_template  → <新しいモジュール名>  （フォルダ名・モジュール名・ウィンドウ名）
+    Tool Template  → <新しい表示名>        （ウィンドウタイトル・ドキュメント）
+    ToolTmpl       → <シェルフラベル>      （シェルフボタン）
+
+optionVar やウィンドウ名の接頭辞は `__package__` から導いているので、
+モジュール名さえ置換すれば自動で追従する（手で直す接頭辞は無い）。
 
 置換した時点で「Maya に入れればウィンドウが開き、GitHub から更新できる」状態に
 なっている。 実装は `core.py`（Maya 非依存の純ロジック）と `ui.py`（cmds）に分けて

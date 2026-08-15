@@ -11,7 +11,7 @@
 
 ```
 install.py          エンドユーザーが触る唯一のファイル（Maya にドラッグ）
-ntk_tool_template/
+tool_template/
   __init__.py       __version__（版数の唯一の情報源）と show()
   core.py           Maya 非依存の純ロジック ← 自宅でテストできるのはここだけ
   ui.py             cmds による UI。 値を集めて core に渡すだけ

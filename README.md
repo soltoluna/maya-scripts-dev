@@ -56,5 +56,5 @@ python -m unittest discover -v
 - 標準セットの定義と設計意図: [`docs/TOOL_SCAFFOLD.md`](docs/TOOL_SCAFFOLD.md)
 - **ホットアップデートの実装パターンと踏んだ落とし穴**:
   [`docs/MAYA_HOT_UPDATE_PATTERNS.md`](docs/MAYA_HOT_UPDATE_PATTERNS.md)
-- 雛形: [`docs/templates/ntk_tool_template/`](docs/templates/ntk_tool_template/)
+- 雛形: [`docs/templates/tool_template/`](docs/templates/tool_template/)
 - 作業ログ: [`docs/PROGRESS.md`](docs/PROGRESS.md)

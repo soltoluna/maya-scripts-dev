@@ -29,7 +29,7 @@ from . import __version__
 _GITHUB_OWNER = "soltoluna"
 _GITHUB_REPO = "maya-scripts-dev"
 _GITHUB_BRANCH = "main"
-_REPO_SUBDIR = "ntk_tool_template"   # モノレポ内のツールフォルダ名。 単独リポジトリなら ""
+_REPO_SUBDIR = "tool_template"   # モノレポ内のツールフォルダ名。 単独リポジトリなら ""
 # ─── END CUSTOMIZE ────────────────────────────────────────────────────────
 
 

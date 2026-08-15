@@ -58,9 +58,9 @@ UI のボタンかシェルフの右クリックから行う。
 ツール 1 本 = フォルダ 1 つで、中に**同名のパッケージ**を持つ。
 
 ```
-ntk_foo/
+<tool_name>/
 ├── install.py      ← パッケージの「外」
-└── ntk_foo/        ← パッケージ本体
+└── <tool_name>/    ← パッケージ本体
     └── __init__.py
 ```
 
@@ -176,17 +176,18 @@ fetch されて `exec` されるファイル**だから。 パッケージの一
 
 ## 雛形の実体
 
-`docs/templates/ntk_tool_template/` にある。 置換すべき語は 4 つ:
+`docs/templates/tool_template/` にある。 置換すべき語は 3 つ:
 
 | 置換前 | 置換後 | 使われている場所 |
 |---|---|---|
-| `ntk_tool_template` | `ntk_<name>` | フォルダ名・モジュール名・ウィンドウ名 |
+| `tool_template` | `<tool_name>` | フォルダ名・モジュール名・ウィンドウ名・optionVar キー |
 | `Tool Template` | `<表示名>` | ウィンドウタイトル・ドキュメント |
 | `ToolTmpl` | `<シェルフラベル>` | シェルフボタン |
-| `tmpl` | `<prefix>` | `ui.py` の `_PREFIX`（optionVar / scriptJob の名前） |
 
-`ui.py` の `WINDOW` と `dev_tools.py` の `_PACKAGE` は `__package__` から導いて
-いるので**触らない**。 フォルダ名を変えれば自動で追従する。
+**手で決める接頭辞は無い。** `ui.py` の `WINDOW` も optionVar キーも
+`dev_tools.py` の `_PACKAGE` も `__package__` から導いてあるので、フォルダ名を
+変えれば自動で追従する。 個人の接頭辞（`ntk_` 等）を付けない方針なので、
+名前空間はモジュール名そのもので切っている（CLAUDE.md「ルール」）。
 
 雛形はコピーした時点で 17 件のテストが通り、`check_tools.py` が `0 error` になる
 （ルート README への行追加を除く）。 通らなくなったら置換漏れを疑う。
