@@ -291,6 +291,11 @@ python -m unittest discover -v                 # ハブ install.py（配布の�
 
 - 作業ログは `docs/PROGRESS.md` に要点のみ記録（会話ログそのものは書かない）
 - セッション終了時は `/wrapup`、開始時は `/resume`
+- **`/wrapup` と `/resume` の実体は `~/.claude/commands/` にあり、全プロジェクト共通**
+  （2026-08-19 に共通化。`.claude/commands/` の専用版は削除した。復活させないこと）。
+  **この節がこのワークスペース固有の追加ルールで、`/wrapup` はここを読んで従う**
+- **PROGRESS.md の「現状」には、実機（会社の Maya）で確認済みか未確認かを必ず書く。**
+  この開発機に Maya は無いので、テストが通っただけの版を「動いた」と書かない
 - PROGRESS.md は直近 10 件を目安に、古いものは `docs/archive/YYYY-MM.md` へ移動
 - ツール固有の詳細な進捗・既知の課題は各ツールの `SPEC.md` の `## 実装状況` に書く
 - **実機確認の待ち行列を PROGRESS.md で管理する。** 「実装済み・実機未確認」の版が
