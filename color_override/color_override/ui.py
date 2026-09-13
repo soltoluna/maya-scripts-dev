@@ -12,10 +12,15 @@
 持たないのは、シーンを保存して開き直したあとも Restore を効かせるため。
 
     ntk_color_override_<対象名>_SHD   surfaceShader（outColor が表示色）
-      .ntkColorOverrideOriginal       元の shadingEngine 名 ← 復元の情報源
+      .ntkColorOverrideOriginal       元の SG（旧形式・管理対象の目印）
       .ntkColorOverrideTarget         掛けた時点の対象ノード名（表示用）
-      .ntkColorOverrideMembers        掛けた相手 ← 一時解除から戻す情報源
+      .ntkColorOverrideMembers        掛けた相手（シェイプ）
+      .ntkColorOverrideOriginals      **それぞれの戻し先** ← 復元の情報源
     ntk_color_override_<対象名>_SG    上をつないだ shadingEngine
+
+**戻し先はメンバーごとに持つ。** グループノードに掛けると中のシェイプは
+別々のマテリアルを持ちうるので、1 件につき 1 つでは戻せない（v0.2.0 までは
+1 つしか持たず、グループに掛けると全部グレーになった）。
 
 `surfaceShader` を使うのはライティングに影響されないフラットな色になるため。
 陰影が乗らないぶん、同系色のオブジェクトの境界（＝貫通している箇所）が
@@ -64,6 +69,11 @@ _ATTR_TARGET = NAMESPACE + "ColorOverrideTarget"
 # シーンから読めなくなる。 掛けた相手をシェーダー側に控えておく
 _ATTR_MEMBERS = NAMESPACE + "ColorOverrideMembers"
 
+# メンバーと 1 対 1 で対応する戻し先。 グループに掛けると中のシェイプは
+# 別々のマテリアルを持ちうるので、_ATTR_ORIGINAL の 1 つでは戻せない。
+# v0.2.0 までのシーンにはこの属性が無いので、その場合は _ATTR_ORIGINAL で埋める
+_ATTR_ORIGINALS = NAMESPACE + "ColorOverrideOriginals"
+
 # シェーダーを持たないオブジェクトを戻すときの行き先（Maya の既定）
 _DEFAULT_SG = "initialShadingGroup"
 
@@ -82,25 +92,26 @@ _ROWS = []        # 一覧に出している記録。 行番号 → 記録の対
 # --------------------------------------------------------------------------- #
 
 def _shapes_of(node):
-    """シェーダーを割り当てる相手（シェイプ）を返す。 見つからなければ自分自身。"""
-    shapes = cmds.listRelatives(node, shapes=True, noIntermediate=True,
-                                fullPath=True) or []
+    """色を割り当てる相手（シェイプ）をフルパスで返す。
+
+    **`listRelatives(shapes=True)` では足りない。** グループノードの子は
+    トランスフォームなので直下にシェイプが無く、空が返る。 v0.2.0 までは
+    その場合にノード自身へフォールバックしていたため、**グループに掛けると
+    「元の shadingEngine が見つからない」→ `initialShadingGroup` を元として
+    記録**し、Restore で中身が全部グレーになった（v0.3.0 で修正）。
+
+    `ls(dag=True, shapes=True)` は部分木をたどるので、グループでも中の
+    シェイプを全部拾う（ノード自身がシェイプならそれを返す）。
+    """
+    shapes = cmds.ls(node, dag=True, shapes=True, noIntermediate=True,
+                     long=True) or []
     return shapes or [node]
 
 
-def _shading_engines(node):
-    """ノードに割り当たっている shadingEngine を重複なく返す。"""
-    found = []
-    for shape in _shapes_of(node):
-        found.extend(cmds.listConnections(shape, type="shadingEngine") or [])
-    return core.unique(found)
-
-
-def _shader_of(shading_engine):
-    """shadingEngine の surfaceShader につながっているシェーダーを返す。"""
-    connected = cmds.listConnections(shading_engine + ".surfaceShader",
-                                     source=True, destination=False) or []
-    return connected[0] if connected else None
+def _shading_engine_of(shape):
+    """シェイプに割り当たっている shadingEngine（最初の 1 つ）。"""
+    found = cmds.listConnections(shape, type="shadingEngine") or []
+    return found[0] if found else _DEFAULT_SG
 
 
 def _is_override_shader(shader):
@@ -140,14 +151,25 @@ def _collect_records():
         # フラグを別に持たないので、Maya 側で手作業に割り当てを変えられても
         # 一覧が実態と食い違わない
         stored = core.split_members(_read_attr(shader, _ATTR_MEMBERS))
+        legacy = _read_attr(shader, _ATTR_ORIGINAL, _DEFAULT_SG)
+
+        # **元の SG はメンバーごとに控える**（グループに掛けると中の
+        # シェイプは別々のマテリアルを持ちうる）。 v0.2.0 までのシーンには
+        # この属性が無いので、旧形式の単一値で埋める
+        known = dict(core.align_originals(
+            stored, core.split_members(_read_attr(shader, _ATTR_ORIGINALS)),
+            legacy))
+        live = members or stored
+
         records.append({
             "shader": shader,
             "sg": shading_engines[0] if shading_engines else None,
-            "original": _read_attr(shader, _ATTR_ORIGINAL, _DEFAULT_SG),
+            "original": legacy,
+            "originals": [known.get(name, legacy) for name in live],
             "target": (_read_attr(shader, _ATTR_TARGET)
-                       or (members[0] if members else shader)),
+                       or (live[0] if live else shader)),
             "color": tuple(color[0])[:3],
-            "members": members or stored,
+            "members": live,
             "enabled": bool(members),
         })
     records.sort(key=lambda rec: core.short_name(rec["target"]))
@@ -173,17 +195,94 @@ def _all_mesh_objects():
 # シーンの書き換え
 # --------------------------------------------------------------------------- #
 
-def _write_members(shader, members):
-    """掛けた相手をシェーダーに控える（一時解除から戻すときの情報源）。"""
+def _write_string(node, attr, value):
+    """文字列属性を（無ければ足してから）書く。"""
+    if not cmds.attributeQuery(attr, node=node, exists=True):
+        cmds.addAttr(node, longName=attr, dataType="string")
+    cmds.setAttr("%s.%s" % (node, attr), value or "", type="string")
+
+
+def _write_assignment(shader, members, originals):
+    """「誰に掛けたか」と「それぞれの戻し先」をシェーダーに控える。
+
+    復元の情報源はシーンに置く。 Python の辞書に持つとシーンを開き直した
+    時点で戻せなくなり、一時解除中は shadingEngine が空なので
+    シーンからも読めなくなる。
+    """
     if not shader or not cmds.objExists(shader):
         return
-    if not cmds.attributeQuery(_ATTR_MEMBERS, node=shader, exists=True):
-        cmds.addAttr(shader, longName=_ATTR_MEMBERS, dataType="string")
-    cmds.setAttr(shader + "." + _ATTR_MEMBERS, core.join_members(members),
-                 type="string")
+    _write_string(shader, _ATTR_MEMBERS, core.join_members(members))
+    _write_string(shader, _ATTR_ORIGINALS, core.join_members(originals))
 
 
-def _apply_one(node, rgb, index):
+def _delete_override(record):
+    """オーバーライド用に作ったノードを片付ける。"""
+    for node in (record.get("sg"), record.get("shader")):
+        if node and cmds.objExists(node):
+            cmds.delete(node)
+
+
+def _original_resolver(records):
+    """シェイプ → **本当の**元 shadingEngine を返す関数を作る。
+
+    既にオーバーライドが掛かっているシェイプは、現在の割り当てが
+    オーバーライド用の SG なので、そのまま控えると二度と元に戻せない。
+    記録に控えてある元の SG を優先する。
+    """
+    known = {}
+    for record in records or []:
+        for member, original in core.align_originals(
+                record.get("members"), record.get("originals"),
+                record.get("original") or _DEFAULT_SG):
+            known[member] = original
+
+    def _resolve(shape):
+        if shape in known:
+            return known[shape]
+        return _shading_engine_of(shape)
+
+    return _resolve
+
+
+def _release_members(records, index, shapes):
+    """これから別のオーバーライドが抱えるシェイプを、既存の記録から外す。
+
+    **1 シェイプ = 1 オーバーライド**を保つための後始末。 たとえばグループに
+    掛けたあと中の 1 つだけ色を変えると、そのシェイプは新しい記録に移る。
+    外した結果メンバーが 0 になった記録は、シェーダーごと片付ける
+    （空のまま残すと一覧に `(off)` として出続ける）。
+    """
+    claimed = set(shapes)
+    for record in list(records):
+        members = record.get("members") or []
+        keep = [name for name in members if name not in claimed]
+        if len(keep) == len(members):
+            continue
+
+        pairs = dict(core.align_originals(members, record.get("originals"),
+                                          record.get("original")
+                                          or _DEFAULT_SG))
+        for name in members:
+            if name not in claimed:
+                continue
+            for key in (name, core.short_name(name)):
+                if index.get(key) is record:
+                    index.pop(key, None)
+
+        record["members"] = keep
+        record["originals"] = [pairs[name] for name in keep]
+
+        if keep:
+            _write_assignment(record["shader"], keep, record["originals"])
+            continue
+
+        _delete_override(record)
+        records.remove(record)
+        for key in [k for k, value in index.items() if value is record]:
+            index.pop(key, None)
+
+
+def _apply_one(node, rgb, records, index, resolve_original):
     """ノード 1 つに色を掛ける。 既に掛かっていれば色だけ差し替える。
 
     `index` は `core.index_by_object()` が作った「対象名 → 記録」の索引。
@@ -191,6 +290,9 @@ def _apply_one(node, rgb, index):
     SG に戻っているため、割り当てからは既存のオーバーライドを見つけられない。
     見つけ損なうと 2 本目のシェーダーを作ってしまい、元のマテリアルの記録が
     二重になる。
+
+    グループノードを渡すと、**中のシェイプを全部拾って 1 件の記録にまとめる**。
+    戻し先はシェイプごとに控えるので、中身のマテリアルがばらばらでも戻せる。
     """
     record = index.get(node) or index.get(core.short_name(node))
 
@@ -204,8 +306,17 @@ def _apply_one(node, rgb, index):
             record["enabled"] = True
         return record["shader"]
 
-    shading_engines = _shading_engines(node)
-    original = shading_engines[0] if shading_engines else _DEFAULT_SG
+    shapes = [name for name in _shapes_of(node) if cmds.objExists(name)]
+    if not shapes:
+        cmds.warning("[%s] %s にシェイプが見つかりません。"
+                     % (_PACKAGE, core.short_name(node)))
+        return None
+
+    # **割り当てを書き換える前に、シェイプごとの戻し先を控える。**
+    originals = [resolve_original(shape) for shape in shapes]
+
+    # これから抱えるシェイプを既存の記録から外す（1 シェイプ = 1 記録）
+    _release_members(records, index, shapes)
 
     shader_name, set_name = core.override_node_names(_NODE_PREFIX, node)
     shader = cmds.shadingNode("surfaceShader", asShader=True, name=shader_name)
@@ -214,22 +325,24 @@ def _apply_one(node, rgb, index):
     cmds.connectAttr(shader + ".outColor", shading_engine + ".surfaceShader",
                      force=True)
 
-    # 復元の情報源はシーンに書く（Python の辞書に持つとシーンを開き直した
-    # 時点で戻せなくなる）
-    cmds.addAttr(shader, longName=_ATTR_ORIGINAL, dataType="string")
-    cmds.setAttr(shader + "." + _ATTR_ORIGINAL, original, type="string")
-    cmds.addAttr(shader, longName=_ATTR_TARGET, dataType="string")
-    cmds.setAttr(shader + "." + _ATTR_TARGET, node, type="string")
+    # _ATTR_ORIGINAL は「このツールが作ったシェーダーか」の目印も兼ねるので、
+    # 旧形式の単一値として必ず書く（v0.2.0 のコードに開かれても壊れない）
+    _write_string(shader, _ATTR_ORIGINAL, originals[0])
+    _write_string(shader, _ATTR_TARGET, node)
 
     cmds.setAttr(shader + ".outColor", rgb[0], rgb[1], rgb[2], type="double3")
-    cmds.sets(node, edit=True, forceElement=shading_engine)
-    _write_members(shader, cmds.sets(shading_engine, q=True) or [node])
+    cmds.sets(shapes, edit=True, forceElement=shading_engine)
+    _write_assignment(shader, shapes, originals)
 
     # 同じ処理の中で続けて引けるよう、作ったものも索引に足しておく
-    record = {"shader": shader, "sg": shading_engine, "original": original,
-              "target": node, "members": [node], "enabled": True}
+    record = {"shader": shader, "sg": shading_engine, "original": originals[0],
+              "originals": originals, "target": node, "members": shapes,
+              "enabled": True}
+    records.append(record)
+    for name in [node] + shapes:
+        index.setdefault(name, record)
+        index.setdefault(core.short_name(name), record)
     index[node] = record
-    index.setdefault(core.short_name(node), record)
     return shader
 
 
@@ -263,35 +376,28 @@ def _disable_records(records):
     # どこへ戻すかを先に控える。 外した時点で shadingEngine が空になり、
     # シーンからは「何に掛かっていたか」が読めなくなる
     for record in targets:
-        _write_members(record.get("shader"), record.get("members"))
+        _write_assignment(record.get("shader"), record.get("members"),
+                          record.get("originals"))
 
-    # 戻し先が同じものは 1 回の cmds.sets にまとめる。 対象ごとに呼ぶと
-    # 数百オブジェクトで往復が効いてくる
-    for original, members in core.group_by_original(targets):
-        existing = [name for name in members if cmds.objExists(name)]
-        if not existing:
-            continue
-        destination = original if cmds.objExists(original) else _DEFAULT_SG
-        cmds.sets(existing, edit=True, forceElement=destination)
+    _return_to_originals(targets)
     return len(targets)
 
 
-def _restore_one(record):
-    """記録 1 件を元のマテリアルに戻し、作ったノードを片付ける。"""
-    shading_engine = record.get("sg")
-    original = record.get("original") or _DEFAULT_SG
-    if not cmds.objExists(original):
-        # 元のマテリアルが既に消えている。 Maya の既定へ逃がす
-        original = _DEFAULT_SG
+def _return_to_originals(records):
+    """記録のメンバーを、**それぞれの**元の shadingEngine へ戻す。
 
-    if shading_engine and cmds.objExists(shading_engine):
-        members = cmds.sets(shading_engine, q=True) or []
-        if members:
-            cmds.sets(members, edit=True, forceElement=original)
+    戻し先が同じものは 1 回の `cmds.sets` にまとめる（`core.group_by_original`）。
+    対象ごとに呼ぶと数百オブジェクトで往復が効いてくる。
 
-    for node in (shading_engine, record.get("shader")):
-        if node and cmds.objExists(node):
-            cmds.delete(node)
+    元のマテリアルが既に消えていたら Maya の既定へ逃がす。
+    """
+    for original, members in core.group_by_original(records):
+        existing = [name for name in members if cmds.objExists(name)]
+        if not existing:
+            continue
+        destination = (original if original and cmds.objExists(original)
+                       else _DEFAULT_SG)
+        cmds.sets(existing, edit=True, forceElement=destination)
 
 
 def _in_undo_chunk(name, func):
@@ -413,11 +519,13 @@ def _apply_to(nodes, colors, label):
 
     # 既存のオーバーライドは 1 度のスキャンで索引にしておく。 ノードごとに
     # 割り当てを辿ると、対象が増えたときに cmds の往復が効いてくる
-    index = core.index_by_object(_collect_records())
+    records = _collect_records()
+    index = core.index_by_object(records)
+    resolve_original = _original_resolver(records)
 
     def _run():
         for node, rgb in zip(nodes, colors):
-            _apply_one(node, rgb, index)
+            _apply_one(node, rgb, records, index, resolve_original)
 
     _in_undo_chunk(label, _run)
     _refresh_list()
@@ -462,19 +570,34 @@ def _restore(records, label):
         return
 
     def _run():
+        _return_to_originals(records)
         for record in records:
-            _restore_one(record)
+            _delete_override(record)
 
     _in_undo_chunk(label, _run)
     _refresh_list()
     print("[%s] %s: %d object(s)" % (_PACKAGE, label, len(records)))
 
 
+def _selection_with_shapes():
+    """選択物と、その下にあるシェイプをまとめて返す。
+
+    記録が抱えているのはシェイプなので、グループやトランスフォームを
+    選んだままでは突き合わせられない。
+    """
+    selection = _selected_objects()
+    names = list(selection)
+    for node in selection:
+        names.extend(_shapes_of(node))
+    return core.unique(names)
+
+
 def _on_restore_selected(*_args):
     """一覧で選んだ行、無ければシーンで選択中のものを元に戻す。"""
     records = _rows_selected_in_list()
     if not records:
-        records = core.match_records(_collect_records(), _selected_objects())
+        records = core.match_records(_collect_records(),
+                                     _selection_with_shapes())
     _restore(records, "restore")
 
 

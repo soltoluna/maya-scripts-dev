@@ -207,9 +207,16 @@ def match_records(records, selection):
     ビューポートで選んだのかで `cmds.ls` の返す形が変わるので、どちらでも
     拾えるようにしておく。
 
+    グループに掛けた場合、`target` はグループでも実際に色が乗っているのは
+    中のシェイプなので、**メンバーでも一致させる**（子を選んで Restore した
+    ときに何も起きないと、掛かっていないように見える）。
+
     >>> recs = [{"target": "|grp|a"}, {"target": "|grp|b"}]
     >>> match_records(recs, ["b"])
     [{'target': '|grp|b'}]
+    >>> match_records([{"target": "|g", "members": ["|g|a|aShape"]}],
+    ...               ["aShape"])
+    [{'target': '|g', 'members': ['|g|a|aShape']}]
     >>> match_records(recs, [])
     []
     """
@@ -217,9 +224,14 @@ def match_records(records, selection):
     for name in selection or []:
         wanted.add(name)
         wanted.add(short_name(name))
-    return [rec for rec in records or []
-            if rec.get("target") in wanted
-            or short_name(rec.get("target")) in wanted]
+
+    found = []
+    for record in records or []:
+        names = [record.get("target")] + list(record.get("members") or [])
+        if any(name in wanted or short_name(name) in wanted
+               for name in names if name):
+            found.append(record)
+    return found
 
 
 def next_start_index(records):
@@ -283,28 +295,63 @@ def any_enabled(records):
     return any(rec.get("enabled", True) for rec in records or [])
 
 
+def align_originals(members, originals, fallback=""):
+    """メンバーと「元の shadingEngine」を 1 対 1 に揃えて返す。
+
+    **グループに掛けると、中のシェイプはそれぞれ別のマテリアルを持ちうる。**
+    だから元の SG はオーバーライド 1 件につき 1 つではなく、**メンバーごと**に
+    控える必要がある（v0.3.0 で直した不具合の核心）。
+
+    v0.2.0 までのシーンには `originals` が無いので、その場合は旧形式の
+    単一値 `fallback` で埋める。
+
+    >>> align_originals(["a", "b"], ["sgA", "sgB"])
+    [('a', 'sgA'), ('b', 'sgB')]
+    >>> align_originals(["a", "b"], [], fallback="sgX")
+    [('a', 'sgX'), ('b', 'sgX')]
+    >>> align_originals(["a", "b"], ["sgA"], fallback="sgX")
+    [('a', 'sgX'), ('b', 'sgX')]
+    >>> align_originals(None, None)
+    []
+    """
+    members = list(members or [])
+    originals = list(originals or [])
+    if len(originals) != len(members):
+        originals = [fallback] * len(members)
+    return list(zip(members, originals))
+
+
 def group_by_original(records):
     """戻し先の shadingEngine ごとに対象をまとめる。
 
-    一時解除は「全部まとめて元の SG へ戻す」操作なので、対象ごとに
+    一時解除も Restore も「まとめて元の SG へ戻す」操作なので、対象ごとに
     `cmds.sets` を呼ぶと数百回の往復になる。 戻り先が同じものを 1 回の
     呼び出しにまとめるためのグルーピング。 順序は最初に出てきた順。
+
+    メンバーごとの `originals` があればそれを使い、無ければ旧形式の
+    `original`（1 件に 1 つ）で埋める。
 
     >>> group_by_original([{"original": "sgA", "members": ["a"]},
     ...                    {"original": "sgB", "members": ["b"]},
     ...                    {"original": "sgA", "members": ["c"]}])
     [('sgA', ['a', 'c']), ('sgB', ['b'])]
+    >>> group_by_original([{"members": ["a", "b"],
+    ...                     "originals": ["sgA", "sgB"]}])
+    [('sgA', ['a']), ('sgB', ['b'])]
     >>> group_by_original([{"original": "sgA", "members": []}])
     []
     """
     groups = {}
     order = []
     for record in records or []:
-        key = record.get("original") or ""
-        if key not in groups:
-            groups[key] = []
-            order.append(key)
-        groups[key].extend(record.get("members") or [])
+        pairs = align_originals(record.get("members"),
+                                record.get("originals"),
+                                record.get("original") or "")
+        for member, original in pairs:
+            if original not in groups:
+                groups[original] = []
+                order.append(original)
+            groups[original].append(member)
     return [(key, groups[key]) for key in order if groups[key]]
 
 

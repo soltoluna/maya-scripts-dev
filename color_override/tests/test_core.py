@@ -244,6 +244,52 @@ class PeekCase(unittest.TestCase):
         self.assertIs(index["|b|body"], second)
         self.assertIs(index["body"], first)
 
+    def test_align_pairs_members_with_their_own_destination(self):
+        """グループの中身がばらばらのマテリアルでも戻せること。"""
+        self.assertEqual(core.align_originals(["a", "b"], ["sgA", "sgB"]),
+                         [("a", "sgA"), ("b", "sgB")])
+
+    def test_align_falls_back_for_old_scenes(self):
+        """v0.2.0 までのシーンには originals が無い（旧形式の単一値で埋める）。"""
+        self.assertEqual(core.align_originals(["a", "b"], [], fallback="sgX"),
+                         [("a", "sgX"), ("b", "sgX")])
+
+    def test_align_falls_back_when_lengths_disagree(self):
+        """食い違ったまま zip すると、無関係な SG へ戻して事故になる。"""
+        self.assertEqual(core.align_originals(["a", "b"], ["sgA"],
+                                              fallback="sgX"),
+                         [("a", "sgX"), ("b", "sgX")])
+
+    def test_align_of_nothing(self):
+        self.assertEqual(core.align_originals(None, None), [])
+
+    def test_group_splits_a_record_across_destinations(self):
+        """1 件の記録の中でも戻し先が違えば分かれること（グループ対応の核心）。"""
+        grouped = core.group_by_original([
+            {"members": ["hair1", "hair2", "skin1"],
+             "originals": ["sgHair", "sgHair", "sgSkin"]},
+        ])
+        self.assertEqual(grouped, [("sgHair", ["hair1", "hair2"]),
+                                   ("sgSkin", ["skin1"])])
+
+    def test_group_still_handles_the_old_single_original(self):
+        grouped = core.group_by_original([{"original": "sgA",
+                                           "members": ["a", "b"]}])
+        self.assertEqual(grouped, [("sgA", ["a", "b"])])
+
+    def test_match_finds_a_group_record_from_a_child_shape(self):
+        """子を選んで Restore しても、それを抱えている記録が見つかること。"""
+        record = {"target": "|hair_grp",
+                  "members": ["|hair_grp|a|aShape", "|hair_grp|b|bShape"]}
+        self.assertEqual(core.match_records([record], ["|hair_grp|b|bShape"]),
+                         [record])
+        self.assertEqual(core.match_records([record], ["bShape"]), [record])
+
+    def test_match_does_not_return_a_record_twice(self):
+        record = {"target": "|g", "members": ["|g|a|aShape"]}
+        found = core.match_records([record], ["|g", "|g|a|aShape"])
+        self.assertEqual(found, [record])
+
     def test_format_row_marks_disabled_records(self):
         record = {"target": "|grp|a", "color": (0.0, 0.0, 1.0),
                   "enabled": False}

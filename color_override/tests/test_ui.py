@@ -15,6 +15,8 @@ import unittest
 
 import _bootstrap
 
+from color_override import core
+
 
 class EmptySelectionCase(unittest.TestCase):
     """対象が無いときに黙って壊れないこと。"""
@@ -112,6 +114,56 @@ class ToggleCase(unittest.TestCase):
         self.assertEqual(self.ui._enable_records([{"enabled": True}]), 0)
         self.assertEqual(self.ui._disable_records([]), 0)
         self.assertEqual(self.ui._enable_records(None), 0)
+
+
+class ReleaseMembersCase(unittest.TestCase):
+    """1 シェイプ = 1 オーバーライド を保つ後始末。
+
+    グループに掛けたあと中の 1 つだけ色を変えたときに、そのシェイプが
+    2 つの記録に属したままにならないこと。
+    """
+
+    def setUp(self):
+        _bootstrap.reset_registry()
+        self.module = _bootstrap.reload_tool()
+        self.ui = self.module.ui
+        self.record = {"shader": "shdA", "sg": "sgA", "target": "|hair_grp",
+                       "members": ["|hair_grp|a|aShape", "|hair_grp|b|bShape"],
+                       "originals": ["sgHair", "sgSkin"]}
+        self.records = [self.record]
+        self.index = core.index_by_object(self.records)
+
+    def test_released_member_leaves_the_record(self):
+        self.ui._release_members(self.records, self.index,
+                                 ["|hair_grp|a|aShape"])
+        self.assertEqual(self.record["members"], ["|hair_grp|b|bShape"])
+        self.assertIn(self.record, self.records)
+
+    def test_the_remaining_destinations_stay_aligned(self):
+        """外したあとに戻し先がずれると、別のマテリアルへ戻して事故になる。"""
+        self.ui._release_members(self.records, self.index,
+                                 ["|hair_grp|a|aShape"])
+        self.assertEqual(self.record["originals"], ["sgSkin"])
+
+    def test_released_member_is_dropped_from_the_index(self):
+        self.ui._release_members(self.records, self.index,
+                                 ["|hair_grp|a|aShape"])
+        self.assertNotIn("|hair_grp|a|aShape", self.index)
+        self.assertIn("|hair_grp|b|bShape", self.index)
+
+    def test_a_record_that_loses_everything_is_dropped(self):
+        self.ui._release_members(self.records, self.index,
+                                 ["|hair_grp|a|aShape",
+                                  "|hair_grp|b|bShape"])
+        self.assertEqual(self.records, [])
+        self.assertEqual(self.index, {},
+                         "記録を消したのに索引に残っている")
+
+    def test_untouched_records_are_left_alone(self):
+        self.ui._release_members(self.records, self.index, ["|other|xShape"])
+        self.assertEqual(self.record["members"],
+                         ["|hair_grp|a|aShape", "|hair_grp|b|bShape"])
+        self.assertEqual(self.record["originals"], ["sgHair", "sgSkin"])
 
 
 class WindowCase(unittest.TestCase):
