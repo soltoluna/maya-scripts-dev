@@ -4,7 +4,7 @@
 
 | ツール | カテゴリ | バージョン | 対応Maya | 起動方法 | 機能概要 |
 |---|---|---|---|---|---|
-| [color_override](color_override/) | Utility | 0.1.0 | 2024+ | シェルフ `ColorOvr` | 選択物を任意の色でフラットに塗り分け、同系色のオブジェクトの貫通をビューポートで見分ける（**実機未確認**） |
+| [color_override](color_override/) | Utility | 0.2.0 | 2024+ | シェルフ `ColorOvr` | 選択物を任意の色でフラットに塗り分け、同系色のオブジェクトの貫通をビューポートで見分ける（**実機未確認**） |
 | [unload_reference_delete](unload_reference_delete/) | Reference | 0.2.0 | 2024+ | シェルフ `UnldRefDel` | アンロード中のリファレンスを一覧してまとめて削除（**実機未確認**） |
 
 **配布はリポジトリ直下の [`install.py`](install.py) 1 本**。 これを

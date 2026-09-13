@@ -181,5 +181,74 @@ class RecordCase(unittest.TestCase):
         self.assertEqual(core.next_start_index(None), 0)
 
 
+class PeekCase(unittest.TestCase):
+    """一時解除（peek）の判断まわり。"""
+
+    def test_members_round_trip(self):
+        members = ["|grp|a|aShape", "|grp|b|bShape"]
+        self.assertEqual(core.split_members(core.join_members(members)),
+                         members)
+
+    def test_members_drop_empty_entries(self):
+        self.assertEqual(core.join_members(["a", "", None, "b"]), "a;b")
+        self.assertEqual(core.split_members(";;a;;b;"), ["a", "b"])
+        self.assertEqual(core.split_members(None), [])
+
+    def test_any_enabled_defaults_to_true(self):
+        """v0.1.0 で作られた記録を解除済みと誤判定しないこと。"""
+        self.assertTrue(core.any_enabled([{"target": "a"}]))
+
+    def test_any_enabled(self):
+        self.assertTrue(core.any_enabled([{"enabled": False},
+                                          {"enabled": True}]))
+        self.assertFalse(core.any_enabled([{"enabled": False}]))
+        self.assertFalse(core.any_enabled([]))
+        self.assertFalse(core.any_enabled(None))
+
+    def test_group_by_original_merges_the_same_destination(self):
+        """戻し先が同じものが 1 回の cmds.sets にまとまること。"""
+        grouped = core.group_by_original([
+            {"original": "sgA", "members": ["a1", "a2"]},
+            {"original": "sgB", "members": ["b1"]},
+            {"original": "sgA", "members": ["a3"]},
+        ])
+        self.assertEqual(grouped, [("sgA", ["a1", "a2", "a3"]),
+                                   ("sgB", ["b1"])])
+
+    def test_group_by_original_skips_empty_groups(self):
+        self.assertEqual(core.group_by_original([{"original": "sgA"}]), [])
+        self.assertEqual(core.group_by_original([]), [])
+        self.assertEqual(core.group_by_original(None), [])
+
+    def test_index_finds_a_record_by_every_name(self):
+        record = {"target": "|grp|body", "members": ["|grp|body|bodyShape"]}
+        index = core.index_by_object([record])
+        for key in ("|grp|body", "body", "|grp|body|bodyShape", "bodyShape"):
+            with self.subTest(key=key):
+                self.assertIs(index[key], record)
+
+    def test_index_ignores_unknown_names(self):
+        index = core.index_by_object([{"target": "a"}])
+        self.assertNotIn("b", index)
+
+    def test_index_of_nothing_is_empty(self):
+        self.assertEqual(core.index_by_object([]), {})
+        self.assertEqual(core.index_by_object(None), {})
+
+    def test_index_keeps_the_first_record_for_a_duplicate_short_name(self):
+        """別グループに同名がある場合、フルパスでは必ず正しく引けること。"""
+        first = {"target": "|a|body", "members": []}
+        second = {"target": "|b|body", "members": []}
+        index = core.index_by_object([first, second])
+        self.assertIs(index["|a|body"], first)
+        self.assertIs(index["|b|body"], second)
+        self.assertIs(index["body"], first)
+
+    def test_format_row_marks_disabled_records(self):
+        record = {"target": "|grp|a", "color": (0.0, 0.0, 1.0),
+                  "enabled": False}
+        self.assertEqual(core.format_row(record), "a   #0000FF   (off)")
+
+
 if __name__ == "__main__":
     unittest.main()

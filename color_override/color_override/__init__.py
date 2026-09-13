@@ -9,11 +9,18 @@
     Apply to Selected     選択物にカラーピッカーで指定した色を掛ける
     Random → Selected     選択物に互いに見分けやすい色を自動で振る
     Random → All Meshes   シーンの全メッシュに同上
-    Restore               元のマテリアル割り当てに戻す
+    Hide / Show Colors    色を一時的に外して元のマテリアルを見る（記録は残す）
+    Restore               色を外して記録ごと片付ける
+
+`toggle()` はウィンドウを開いていなくても呼べるので、**ホットキーに割り当てて
+一瞬だけ元のマテリアルを確かめる**使い方ができる::
+
+    import color_override
+    color_override.toggle()
 
 **元の割り当てはシーンに書き込んで保持する**（オーバーライド用シェーダーの
 文字列属性）。 Python 側の辞書に持たないので、シーンを保存して開き直しても
-Restore が効く。
+一時解除も Restore も効く。
 
 実装は `core.py`（Maya 非依存の純ロジック）と `ui.py`（cmds）に分けてある —
 自宅に Maya が無いので、`core.py` に寄せた分だけ手元で検証できる。
@@ -26,7 +33,7 @@ Restore が効く。
 from __future__ import annotations
 
 # 先に定義する（サブモジュールが `from . import __version__` で参照するため）
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # シェルフボタンに出す短い名前（10 文字以内）。 ハブ `install.py` がここを読んで
 # ボタンを貼る。 **表示名であってツール名ではない**ので接頭辞は付けない
@@ -49,10 +56,19 @@ from . import core      # noqa: E402  Maya 非依存の純ロジック
 from . import dev_tools  # noqa: E402  バージョン表示 / GitHub から更新
 from . import ui        # noqa: E402  cmds による UI
 
-__all__ = ["show", "core", "ui", "dev_tools", "__version__", "NAMESPACE",
-           "SHELF_LABEL"]
+__all__ = ["show", "toggle", "core", "ui", "dev_tools", "__version__",
+           "NAMESPACE", "SHELF_LABEL"]
 
 
 def show():
     """ツールウィンドウを開く。 シェルフボタンが呼ぶ入口。"""
     return ui.show()
+
+
+def toggle():
+    """色のオーバーライドを一時的に外す／掛け直す。
+
+    ウィンドウを開いていなくても動くので、ホットキーやシェルフボタンに
+    割り当てられる。 記録は残るので何度でも往復できる。
+    """
+    return ui.toggle()

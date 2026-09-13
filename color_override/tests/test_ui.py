@@ -77,6 +77,43 @@ class LastColorCase(unittest.TestCase):
         self.assertEqual(self.ui._load_last_color(), self.ui._DEFAULT_COLOR)
 
 
+class ToggleCase(unittest.TestCase):
+    """一時解除（peek）の入口。"""
+
+    def setUp(self):
+        _bootstrap.reset_registry()
+        self.module = _bootstrap.reload_tool()
+        self.ui = self.module.ui
+
+    def test_toggle_is_exposed_on_the_package(self):
+        """ホットキーから `color_override.toggle()` で呼べること。"""
+        self.assertTrue(callable(getattr(self.module, "toggle", None)))
+        self.assertIn("toggle", self.module.__all__)
+
+    def test_toggle_without_overrides_warns(self):
+        self.module.toggle()
+        self.assertTrue(_bootstrap.MESSAGES,
+                        "オーバーライドが無いときに警告が出ていない")
+
+    def test_toggle_without_overrides_does_not_touch_undo(self):
+        self.module.toggle()
+        self.assertEqual(_bootstrap.UNDO_CHUNKS, [])
+        self.assertNotIn("undoInfo",
+                         [name for name, _a, _k in _bootstrap.CALLS])
+
+    def test_toggle_works_without_a_window(self):
+        """ウィンドウを開かずに呼んでも落ちないこと（ホットキー用途）。"""
+        self.ui._CTRL.clear()
+        self.module.toggle()   # 例外が出なければよい
+
+    def test_enable_and_disable_ignore_records_in_the_wrong_state(self):
+        """既にその状態のものは触らない（無駄な cmds.sets を出さない）。"""
+        self.assertEqual(self.ui._disable_records([{"enabled": False}]), 0)
+        self.assertEqual(self.ui._enable_records([{"enabled": True}]), 0)
+        self.assertEqual(self.ui._disable_records([]), 0)
+        self.assertEqual(self.ui._enable_records(None), 0)
+
+
 class WindowCase(unittest.TestCase):
     """ウィンドウの組み立て。"""
 
@@ -100,6 +137,15 @@ class WindowCase(unittest.TestCase):
         self.assertNotEqual(first, self.ui._CTRL,
                             "2 回目の show() で古いコントロール名が残っている")
 
+    def test_toggle_button_starts_disabled(self):
+        """掛かっていない状態で押せてしまわないこと。"""
+        self.module.show()
+        ctrl = self.ui._CTRL["toggle"]
+        stored = _bootstrap.CONTROLS[ctrl]
+        self.assertFalse(stored.get("enable"),
+                         "オーバーライドが無いのにトグルが有効になっている")
+        self.assertEqual(stored.get("label"), "Hide Colors")
+
     def test_window_name_is_namespaced(self):
         self.assertTrue(self.ui.WINDOW.startswith(self.module.NAMESPACE + "_"))
 
@@ -108,7 +154,8 @@ class WindowCase(unittest.TestCase):
         self.assertTrue(
             self.ui._NODE_PREFIX.startswith(self.module.NAMESPACE + "_"),
             "シーンに作るノードの接頭辞が名前空間に入っていない")
-        for attr in (self.ui._ATTR_ORIGINAL, self.ui._ATTR_TARGET):
+        for attr in (self.ui._ATTR_ORIGINAL, self.ui._ATTR_TARGET,
+                     self.ui._ATTR_MEMBERS):
             with self.subTest(attr=attr):
                 self.assertTrue(attr.startswith(self.module.NAMESPACE))
 

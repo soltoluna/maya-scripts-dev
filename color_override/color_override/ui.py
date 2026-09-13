@@ -14,6 +14,7 @@
     ntk_color_override_<対象名>_SHD   surfaceShader（outColor が表示色）
       .ntkColorOverrideOriginal       元の shadingEngine 名 ← 復元の情報源
       .ntkColorOverrideTarget         掛けた時点の対象ノード名（表示用）
+      .ntkColorOverrideMembers        掛けた相手 ← 一時解除から戻す情報源
     ntk_color_override_<対象名>_SG    上をつないだ shadingEngine
 
 `surfaceShader` を使うのはライティングに影響されないフラットな色になるため。
@@ -22,6 +23,14 @@
 
 **管理対象の判別は名前ではなく `.ntkColorOverrideOriginal` 属性の有無で行う。**
 ユーザーがノードをリネームしても追跡できる。
+
+## 一時解除（peek）と Restore の違い
+
+    Hide / Show Colors   対象を元の SG に戻すだけ。 ノードは残すので掛け直せる
+    Restore              元の SG に戻したうえでノードごと削除する
+
+**解除中かどうかのフラグは持たない。** shadingEngine にメンバーが居るかどうかが
+そのまま状態なので、Maya 側で手作業に割り当てを変えられても表示と食い違わない。
 """
 
 from __future__ import annotations
@@ -50,6 +59,10 @@ _NODE_PREFIX = _NS
 # オーバーライド用シェーダーに書き込む印。 この属性の有無が管理対象の判定そのもの
 _ATTR_ORIGINAL = NAMESPACE + "ColorOverrideOriginal"
 _ATTR_TARGET = NAMESPACE + "ColorOverrideTarget"
+
+# 一時解除（peek）中は shadingEngine が空になり、何に掛かっていたのかが
+# シーンから読めなくなる。 掛けた相手をシェーダー側に控えておく
+_ATTR_MEMBERS = NAMESPACE + "ColorOverrideMembers"
 
 # シェーダーを持たないオブジェクトを戻すときの行き先（Maya の既定）
 _DEFAULT_SG = "initialShadingGroup"
@@ -122,6 +135,11 @@ def _collect_records():
         for shading_engine in shading_engines:
             members.extend(cmds.sets(shading_engine, q=True) or [])
         color = cmds.getAttr(shader + ".outColor") or [(0.0, 0.0, 0.0)]
+
+        # **色が出ているかは shadingEngine にメンバーが居るかで決まる。**
+        # フラグを別に持たないので、Maya 側で手作業に割り当てを変えられても
+        # 一覧が実態と食い違わない
+        stored = core.split_members(_read_attr(shader, _ATTR_MEMBERS))
         records.append({
             "shader": shader,
             "sg": shading_engines[0] if shading_engines else None,
@@ -129,6 +147,8 @@ def _collect_records():
             "target": (_read_attr(shader, _ATTR_TARGET)
                        or (members[0] if members else shader)),
             "color": tuple(color[0])[:3],
+            "members": members or stored,
+            "enabled": bool(members),
         })
     records.sort(key=lambda rec: core.short_name(rec["target"]))
     return records
@@ -153,27 +173,36 @@ def _all_mesh_objects():
 # シーンの書き換え
 # --------------------------------------------------------------------------- #
 
-def _existing_override(node):
-    """ノードに既に掛かっているオーバーライドの `(シェーダー, 元の SG)`。
+def _write_members(shader, members):
+    """掛けた相手をシェーダーに控える（一時解除から戻すときの情報源）。"""
+    if not shader or not cmds.objExists(shader):
+        return
+    if not cmds.attributeQuery(_ATTR_MEMBERS, node=shader, exists=True):
+        cmds.addAttr(shader, longName=_ATTR_MEMBERS, dataType="string")
+    cmds.setAttr(shader + "." + _ATTR_MEMBERS, core.join_members(members),
+                 type="string")
 
-    掛け直しのときに**オーバーライド用の SG を「元の SG」として記録して
-    しまう**と、二度と元のマテリアルに戻せなくなる。 それを防ぐための照会。
+
+def _apply_one(node, rgb, index):
+    """ノード 1 つに色を掛ける。 既に掛かっていれば色だけ差し替える。
+
+    `index` は `core.index_by_object()` が作った「対象名 → 記録」の索引。
+    **シーンの現在の割り当てを辿らないのが要点**で、一時解除中は対象が元の
+    SG に戻っているため、割り当てからは既存のオーバーライドを見つけられない。
+    見つけ損なうと 2 本目のシェーダーを作ってしまい、元のマテリアルの記録が
+    二重になる。
     """
-    for shading_engine in _shading_engines(node):
-        shader = _shader_of(shading_engine)
-        if _is_override_shader(shader):
-            return (shader, _read_attr(shader, _ATTR_ORIGINAL, _DEFAULT_SG))
-    return (None, None)
+    record = index.get(node) or index.get(core.short_name(node))
 
-
-def _apply_one(node, rgb):
-    """ノード 1 つに色を掛ける。 既に掛かっていれば色だけ差し替える。"""
-    shader, _original = _existing_override(node)
-
-    if shader:
-        cmds.setAttr(shader + ".outColor", rgb[0], rgb[1], rgb[2],
+    if record:
+        cmds.setAttr(record["shader"] + ".outColor", rgb[0], rgb[1], rgb[2],
                      type="double3")
-        return shader
+        # 一時解除中に色を掛けたなら、見えるように戻す（掛けたのに何も
+        # 変わらないほうが分かりにくい）
+        if not record.get("enabled", True):
+            _enable_records([record])
+            record["enabled"] = True
+        return record["shader"]
 
     shading_engines = _shading_engines(node)
     original = shading_engines[0] if shading_engines else _DEFAULT_SG
@@ -194,7 +223,57 @@ def _apply_one(node, rgb):
 
     cmds.setAttr(shader + ".outColor", rgb[0], rgb[1], rgb[2], type="double3")
     cmds.sets(node, edit=True, forceElement=shading_engine)
+    _write_members(shader, cmds.sets(shading_engine, q=True) or [node])
+
+    # 同じ処理の中で続けて引けるよう、作ったものも索引に足しておく
+    record = {"shader": shader, "sg": shading_engine, "original": original,
+              "target": node, "members": [node], "enabled": True}
+    index[node] = record
+    index.setdefault(core.short_name(node), record)
     return shader
+
+
+def _enable_records(records):
+    """一時解除していたオーバーライドを掛け直す。 戻した件数を返す。"""
+    restored = 0
+    for record in records or []:
+        if record.get("enabled", True):
+            continue
+        shading_engine = record.get("sg")
+        if not shading_engine or not cmds.objExists(shading_engine):
+            continue
+        members = [name for name in (record.get("members") or [])
+                   if cmds.objExists(name)]
+        if not members:
+            continue
+        cmds.sets(members, edit=True, forceElement=shading_engine)
+        restored += 1
+    return restored
+
+
+def _disable_records(records):
+    """色を一時的に外して元のマテリアルに戻す（記録は残す）。 外した件数を返す。
+
+    `Restore` と違ってシェーダーとセットは消さないので、そのまま掛け直せる。
+    """
+    targets = [rec for rec in records or [] if rec.get("enabled", True)]
+    if not targets:
+        return 0
+
+    # どこへ戻すかを先に控える。 外した時点で shadingEngine が空になり、
+    # シーンからは「何に掛かっていたか」が読めなくなる
+    for record in targets:
+        _write_members(record.get("shader"), record.get("members"))
+
+    # 戻し先が同じものは 1 回の cmds.sets にまとめる。 対象ごとに呼ぶと
+    # 数百オブジェクトで往復が効いてくる
+    for original, members in core.group_by_original(targets):
+        existing = [name for name in members if cmds.objExists(name)]
+        if not existing:
+            continue
+        destination = original if cmds.objExists(original) else _DEFAULT_SG
+        cmds.sets(existing, edit=True, forceElement=destination)
+    return len(targets)
 
 
 def _restore_one(record):
@@ -279,9 +358,20 @@ def _refresh_list(*_args):
     for record in _ROWS:
         cmds.textScrollList(ctrl, edit=True, append=core.format_row(record))
 
+    # 1 件も無いときは「掛かっていない」なので、トグルは押せない状態のまま
+    # 既定のラベルにしておく（Show Colors と出ていて押せないのは紛らわしい）
+    showing = core.any_enabled(_ROWS) if _ROWS else True
+
     if _CTRL.get("count"):
         cmds.text(_CTRL["count"], edit=True,
-                  label="Overridden: %d" % (len(_ROWS),))
+                  label="Overridden: %d%s"
+                        % (len(_ROWS), "" if showing else "   — 一時解除中"))
+
+    # トグルのラベルは**シーンの実態から**決める。 別にフラグを持つと、
+    # Maya 側で割り当てを手で変えられたときに表示と食い違う
+    if _CTRL.get("toggle"):
+        cmds.button(_CTRL["toggle"], edit=True, enable=bool(_ROWS),
+                    label="Hide Colors" if showing else "Show Colors")
 
 
 def _rows_selected_in_list():
@@ -321,9 +411,13 @@ def _apply_to(nodes, colors, label):
         cmds.warning("[%s] 対象がありません。" % (_PACKAGE,))
         return
 
+    # 既存のオーバーライドは 1 度のスキャンで索引にしておく。 ノードごとに
+    # 割り当てを辿ると、対象が増えたときに cmds の往復が効いてくる
+    index = core.index_by_object(_collect_records())
+
     def _run():
         for node, rgb in zip(nodes, colors):
-            _apply_one(node, rgb)
+            _apply_one(node, rgb, index)
 
     _in_undo_chunk(label, _run)
     _refresh_list()
@@ -388,6 +482,40 @@ def _on_restore_all(*_args):
     _restore(_collect_records(), "restore all")
 
 
+def _on_toggle(*_args):
+    """色の表示を一時的に外す／掛け直す（記録は残す）。"""
+    records = _collect_records()
+    if not records:
+        cmds.warning("[%s] オーバーライドが掛かっていません。" % (_PACKAGE,))
+        _refresh_list()
+        return
+
+    if core.any_enabled(records):
+        count = _in_undo_chunk("hide overrides",
+                               lambda: _disable_records(records))
+        message = "hide overrides"
+    else:
+        count = _in_undo_chunk("show overrides",
+                               lambda: _enable_records(records))
+        message = "show overrides"
+
+    _refresh_list()
+    print("[%s] %s: %d object(s)" % (_PACKAGE, message, count))
+
+
+def toggle():
+    """オーバーライドの表示を一時的に切り替える。
+
+    ウィンドウを開いていなくても呼べるので、**ホットキーやシェルフボタンに
+    割り当てて使える**。 「一瞬だけ元のマテリアルを見たい」のが主な用途なので、
+    ボタンまでマウスを運ばずに往復できるほうが速い。
+
+        import color_override
+        color_override.toggle()
+    """
+    return _on_toggle()
+
+
 def _on_select_in_scene(*_args):
     """一覧で選んだ行のオブジェクトをシーンでも選択する。"""
     targets = [rec["target"] for rec in _rows_selected_in_list()
@@ -433,6 +561,16 @@ def _build_body():
 
     _CTRL["count"] = cmds.text(label="Overridden: 0", align="left",
                                fn="boldLabelFont")
+
+    # 「一瞬だけ元のマテリアルを見る」ための往復。 Restore と違って
+    # シェーダーは消さないので、何度でも掛け直せる
+    _CTRL["toggle"] = cmds.button(
+        label="Hide Colors", height=28, c=_on_toggle, enable=False,
+        ann="色を一時的に外して元のマテリアルを見る／掛け直す。\n"
+            "記録は残るので何度でも往復できる。\n"
+            "ホットキーに割り当てるなら: "
+            "import color_override; color_override.toggle()")
+
     _CTRL["list"] = cmds.textScrollList(
         height=140, allowMultiSelection=True,
         selectCommand=_on_select_in_scene,

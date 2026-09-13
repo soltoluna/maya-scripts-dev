@@ -188,13 +188,16 @@ def unique(items):
 
 
 def format_row(record):
-    """一覧に出す 1 行（`短い名前   #RRGGBB`）。
+    """一覧に出す 1 行（`短い名前   #RRGGBB`。 一時解除中は `(off)` を付ける）。
 
     >>> format_row({"target": "|grp|pSphere1", "color": (1.0, 0.0, 0.0)})
     'pSphere1   #FF0000'
+    >>> format_row({"target": "a", "color": (1.0, 0.0, 0.0), "enabled": False})
+    'a   #FF0000   (off)'
     """
-    return "%s   %s" % (short_name(record.get("target")),
-                        to_hex(record.get("color") or (0.0, 0.0, 0.0)))
+    row = "%s   %s" % (short_name(record.get("target")),
+                       to_hex(record.get("color") or (0.0, 0.0, 0.0)))
+    return row if record.get("enabled", True) else row + "   (off)"
 
 
 def match_records(records, selection):
@@ -229,3 +232,103 @@ def next_start_index(records):
     2
     """
     return len(records or [])
+
+
+# --------------------------------------------------------------------------- #
+# 一時解除（peek）
+# --------------------------------------------------------------------------- #
+
+# メンバー一覧を 1 本の文字列属性に畳むときの区切り。 Maya のノード名には
+# 使えない文字なので、名前と衝突しない
+_MEMBER_SEP = ";"
+
+
+def join_members(members):
+    """メンバー名の一覧を、属性に書ける 1 本の文字列にする。
+
+    >>> join_members(["|a|aShape", "|b|bShape"])
+    '|a|aShape;|b|bShape'
+    >>> join_members(None)
+    ''
+    """
+    return _MEMBER_SEP.join(name for name in (members or []) if name)
+
+
+def split_members(text):
+    """`join_members` の逆。
+
+    >>> split_members("|a|aShape;|b|bShape")
+    ['|a|aShape', '|b|bShape']
+    >>> split_members("")
+    []
+    """
+    return [name for name in (text or "").split(_MEMBER_SEP) if name]
+
+
+def any_enabled(records):
+    """1 つでも色が出ている状態か（トグルがどちら向きに倒れるかの判断）。
+
+    `enabled` を持たない記録は「出ている」と見なす（v0.1.0 で作られた
+    オーバーライドを開いたときに、解除済みと誤判定しないため）。
+
+    >>> any_enabled([{"enabled": False}, {"enabled": True}])
+    True
+    >>> any_enabled([{"enabled": False}])
+    False
+    >>> any_enabled([{}])
+    True
+    >>> any_enabled([])
+    False
+    """
+    return any(rec.get("enabled", True) for rec in records or [])
+
+
+def group_by_original(records):
+    """戻し先の shadingEngine ごとに対象をまとめる。
+
+    一時解除は「全部まとめて元の SG へ戻す」操作なので、対象ごとに
+    `cmds.sets` を呼ぶと数百回の往復になる。 戻り先が同じものを 1 回の
+    呼び出しにまとめるためのグルーピング。 順序は最初に出てきた順。
+
+    >>> group_by_original([{"original": "sgA", "members": ["a"]},
+    ...                    {"original": "sgB", "members": ["b"]},
+    ...                    {"original": "sgA", "members": ["c"]}])
+    [('sgA', ['a', 'c']), ('sgB', ['b'])]
+    >>> group_by_original([{"original": "sgA", "members": []}])
+    []
+    """
+    groups = {}
+    order = []
+    for record in records or []:
+        key = record.get("original") or ""
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].extend(record.get("members") or [])
+    return [(key, groups[key]) for key in order if groups[key]]
+
+
+def index_by_object(records):
+    """対象名から記録を引く索引（フルパス・短い名前・メンバー名で引ける）。
+
+    **一時解除中は対象が元の SG に戻っているので、現在の割り当てを辿っても
+    オーバーライドを見つけられない。** 見つけ損なうと掛け直しで 2 本目の
+    シェーダーを作ってしまい、元のマテリアルの記録が二重になる。 それを
+    防ぐため、シーンの割り当てではなく記録側から引く。
+
+    >>> idx = index_by_object([{"target": "|grp|a",
+    ...                         "members": ["|grp|a|aShape"]}])
+    >>> idx["|grp|a"] is idx["a"] is idx["|grp|a|aShape"]
+    True
+    >>> "nope" in idx
+    False
+    """
+    index = {}
+    for record in records or []:
+        names = [record.get("target")] + list(record.get("members") or [])
+        for name in names:
+            if not name:
+                continue
+            index.setdefault(name, record)
+            index.setdefault(short_name(name), record)
+    return index
