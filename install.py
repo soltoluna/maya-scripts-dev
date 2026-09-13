@@ -5,7 +5,14 @@
 インストール／更新する。 使い方は 2 通り:
 
 1. このファイルを Maya のビューポートへドラッグ&ドロップする
-2. Script Editor (Python) で ``exec(open(r"C:/path/to/install.py").read())``
+2. Script Editor (Python) で次を実行する::
+
+       exec(open(r"C:/path/to/install.py", encoding="utf-8").read())
+
+   **`encoding="utf-8"` を省かないこと。** `open()` は省略すると OS の
+   ロケール既定で読むので、日本語版 Windows では cp932 になり、
+   このファイル（UTF-8 + 日本語コメント）が読めずに
+   `UnicodeDecodeError` で落ちる（patterns doc §1-11）
 
 どちらの場合も次を行う:
 

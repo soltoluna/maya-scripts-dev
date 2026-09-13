@@ -130,6 +130,11 @@ GitHub の tree API で `<名前>/<名前>/` の形のフォルダを探し、**
   Update All Tools。 **どちらも全ツールをまとめて更新する**
   - **同じファイルを 2 回ドラッグしても何も起きない**（`onMayaDroppedPythonFile` は
     セッション内で 1 度しか呼ばれない）。 ドラッグはアップデート手段にならない
+- **Script Editor から `exec(open(...))` で走らせるなら `encoding="utf-8"` を必ず付ける。**
+  日本語版 Windows の `open()` は cp932 で読むので、UTF-8 + 日本語コメントの
+  `install.py` が `UnicodeDecodeError` で落ちる。 `# -*- coding: utf-8 -*-` は
+  `open()` には効かない。 **自宅では絶対に再現しない**ので、`exec` を案内する
+  文面を書くときに思い出すこと（`docs/MAYA_HOT_UPDATE_PATTERNS.md` §1-11）
 - 更新は必ず **commit SHA を含む immutable URL** から取る。 `raw.githubusercontent.com` の
   CDN は**クエリ文字列を無視してパスだけで**キャッシュするので、`?_=<時刻>` は効かない
 - 実機に届く条件は **push 済みであること**。 ローカルのコミットは実機から見えない

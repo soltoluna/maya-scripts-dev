@@ -309,6 +309,45 @@ Maya の UI コールバックの中で自分自身の親を消してはいけ�
 
 ---
 
+### 1-11. Script Editor の `exec(open(...).read())` が日本語 Windows で落ちる
+
+**症状** (2026-09-13 実機で発生)
+
+```
+exec(open(r"C:\Users\<user>\Desktop\install.py").read())
+# Error: UnicodeDecodeError: 'cp932' codec can't decode byte 0x94
+#        in position 40: illegal multibyte sequence
+```
+
+**原因**
+`open()` はエンコーディングを省略すると **OS のロケール既定**で読む。
+日本語版 Windows では cp932 になるため、**UTF-8 で書かれた日本語コメント入りの
+`.py` が読めない**。
+
+ファイル先頭の `# -*- coding: utf-8 -*-` は Python が**インポート／コンパイル**
+するときの宣言であって、`open()` の挙動には一切影響しない。 ここを混同しやすい。
+
+**この環境では自宅で絶対に再現しない。** 既定コーデックはロケールで変わるので、
+実機（会社の日本語版 Windows）に持っていって初めて出る。
+
+**対策**
+読み手側で明示する:
+
+```python
+exec(open(r"C:/path/to/install.py", encoding="utf-8").read())
+```
+
+**ドラッグ&ドロップ経路（`onMayaDroppedPythonFile`）では起きない。** Maya 自身が
+ファイルを読むため。 だから**配るときはドラッグ&ドロップを既定の手順にし、
+`exec` を案内するときは必ず `encoding="utf-8"` を付けて書く**。
+
+**install.py が実機に書き込む側は影響を受けない。** ダウンロードした中身は
+bytes のまま `open(tmp, "wb")` で書き、読み直すときは
+`open(p, "r", encoding="utf-8")` と明示してある。 危ないのは**人が手で打つ
+`exec(open(...))` の一行だけ**なので、その一行をドキュメントから直した。
+
+---
+
 ## 2. 成功パターン ─ 「ホットアップデート可能な Maya ツール」の標準構成
 
 上の全ての落とし穴を回避した、再利用可能な最終構成:
@@ -502,7 +541,11 @@ run this from inside Maya:
 1) Drag ``install.py`` from your file browser into any Maya viewport.
 2) From the Script Editor (Python tab)::
 
-       exec(open(r"C:/path/to/install.py").read())
+       exec(open(r"C:/path/to/install.py", encoding="utf-8").read())
+
+   The ``encoding`` argument is required: ``open()`` otherwise uses
+   the OS locale codec (cp932 on Japanese Windows) and chokes on
+   UTF-8 source — see §1-11.
 
 Either way:
 
