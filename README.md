@@ -34,7 +34,7 @@ python tools\make_bundle.py --all
 
 受け取った人は **ZIP を展開して、中の `install.py` をビューポートへ
 ドラッグ&ドロップするだけ**。 環境変数も Script Editor も要らず、
-ネットワークにも接続しない。
+ネットワークにも接続しない（**2026-09-16 に Maya 2024 で確認済み**）。
 
 仕掛けは `install.py` の隣に置かれる **`maya_tools_offline.txt`** 1 枚で、
 これがあるとハブは GitHub を見ずに隣のフォルダだけを配る。
