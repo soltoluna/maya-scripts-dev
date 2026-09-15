@@ -169,6 +169,41 @@ class RepositoryCase(unittest.TestCase):
                 % (tool.name,))
 
 
+class OfflineFallbackCase(unittest.TestCase):
+    """GitHub に届かないときの逃げ道。
+
+    社内ネットワークでは TLS 傍受プロキシ・PAC・セキュリティソフトのどれかで
+    **Maya の Python だけが外に出られない**ことがある（ブラウザは通る）。
+    そのとき生のトレースバックで終わらせると、利用者は詰む。
+    """
+
+    def test_without_a_local_checkout_it_explains_the_zip_route(self):
+        """install.py 単体を保存した場合。 maya を触る前に諦めること。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as empty:
+            with self.assertRaises(RuntimeError) as caught:
+                hub._offline_fallback(OSError("ssl handshake failed"), empty)
+        message = str(caught.exception)
+        self.assertIn("ssl handshake failed", message,
+                      "元のエラーが伝わっていない")
+        self.assertIn(".zip", message, "ZIP を落とす導線が案内されていない")
+
+    def test_a_missing_folder_is_not_a_crash(self):
+        with self.assertRaises(RuntimeError):
+            hub._offline_fallback(OSError("boom"),
+                                  str(REPO_ROOT / "does_not_exist"))
+
+    def test_the_repo_itself_is_a_valid_offline_source(self):
+        """ZIP を展開した形＝このリポジトリの形。 ここから拾えること。"""
+        tools = hub._local_tools(str(REPO_ROOT))
+        self.assertTrue(tools, "リポジトリ直下からツールを拾えていない")
+        self.assertEqual(sorted(tools), [p.name for p in _tool_dirs()])
+
+    def test_the_hint_points_at_the_configured_repo(self):
+        self.assertIn(hub._GITHUB_OWNER, hub._OFFLINE_HINT)
+        self.assertIn(hub._GITHUB_REPO, hub._OFFLINE_HINT)
+
+
 class EntryPointCase(unittest.TestCase):
 
     def test_defines_dropped_hook(self):

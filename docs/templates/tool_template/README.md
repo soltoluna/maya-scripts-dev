@@ -32,8 +32,9 @@ Maya の再起動は不要。 **この `install.py` はリポジトリの全ツ�
 
 ## 制約・既知の問題
 
-- 更新には GitHub への HTTPS 接続が必要。 社内プロキシで塞がれている場合は
-  Script Editor にエラーが出る
+- 更新には GitHub への HTTPS 接続が必要。 社内プロキシやセキュリティソフトで
+  塞がれている場合は Script Editor に `URLError` が出る。 その場合は
+  **ルートの README「GitHub に接続できないとき」**のオフライン手順で入れられる
 - Maya 2024 / 2025 の両方で動くよう、Python 3.10 の構文と `maya.cmds` だけで
   書いてある（PySide は 2024=PySide2 / 2025=PySide6 で互換が無いため使っていない）
 

@@ -18,6 +18,31 @@
 足して配布リストへの追記を忘れる事故が起きない**
 （[`docs/MAYA_HOT_UPDATE_PATTERNS.md`](docs/MAYA_HOT_UPDATE_PATTERNS.md) §1-10）。
 
+## GitHub に接続できないとき（社内プロキシ・セキュリティソフト）
+
+社内ネットワークでは、**ブラウザは通るのに Maya の Python だけが外に出られない**
+ことがある（TLS 傍受プロキシ・PAC・セキュリティソフト。 詳しい切り分けは
+[`docs/MAYA_HOT_UPDATE_PATTERNS.md`](docs/MAYA_HOT_UPDATE_PATTERNS.md) §1-12）。
+症状はドラッグ&ドロップ時のこれ:
+
+```
+# Error: URLError: <urlopen error A failure in the SSL library occurred (_ssl.c:997)>
+```
+
+**その場合はオフラインで入れられる。** ネットワーク側の解決を待たなくてよい。
+
+1. ブラウザで
+   [リポジトリの ZIP](https://github.com/soltoluna/maya-scripts-dev/archive/refs/heads/main.zip)
+   をダウンロードして展開する
+2. **展開したフォルダの中にある** `install.py` を Maya のビューポートへ
+   ドラッグ&ドロップする
+3. 「GitHub に接続できませんでした / 隣のフォルダから入れますか？」と聞かれるので
+   **オフラインで入れる** を選ぶ
+
+**`install.py` だけを取り出すとオフラインでは入らない**（隣にツールのフォルダが
+必要）。 この経路で入れた場合、**UI の「GitHub から更新」も同じ理由で失敗する**ので、
+更新のたびに ZIP を取り直すことになる。 恒久対応は情シス側でどれか 1 つを通すこと。
+
 ## 既存スクリプト（標準セット化前）
 
 以前から使っている単体スクリプト。 **まだ `install.py` を持たない**ので、

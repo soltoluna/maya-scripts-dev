@@ -64,8 +64,9 @@ unload_reference_delete.remove_unloaded(confirm=False)  # 確認なし
   一覧には `ノード不明・削除不可` と出る
 - **v0.2.0 は実機（会社の Maya）で未確認**。 手元にある検証はスタブによる
   テストのみで、実 Maya でのリファレンス操作は確かめられていない
-- 更新には GitHub への HTTPS 接続が必要。 社内プロキシで塞がれている場合は
-  Script Editor にエラーが出る
+- 更新には GitHub への HTTPS 接続が必要。 社内プロキシやセキュリティソフトで
+  塞がれている場合は Script Editor に `URLError` が出る。 その場合は
+  **ルートの README「GitHub に接続できないとき」**のオフライン手順で入れられる
 - Maya 2024 / 2025 の両方で動くよう、Python 3.10 の構文と `maya.cmds` だけで
   書いてある
 

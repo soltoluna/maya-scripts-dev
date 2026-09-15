@@ -348,6 +348,84 @@ bytes のまま `open(tmp, "wb")` で書き、読み直すときは
 
 ---
 
+### 1-12. 社内ネットワークで Maya の Python だけが GitHub に届かない
+
+**症状** (2026-09-15 実機で発生。 **同じ社内でも人によって出る／出ない**)
+
+```
+[maya-tools] SHA lookup failed (<urlopen error A failure in the SSL library
+             occurred (_ssl.c:997)>); falling back to branch name
+# Error: URLError: <urlopen error A failure in the SSL library occurred (_ssl.c:997)>
+```
+
+**原因の候補**
+`_ssl.c:997` の「A failure in the SSL library occurred」は**証明書の検証失敗
+ではない**（それなら `CERTIFICATE_VERIFY_FAILED` と出る）。 TLS ハンドシェイクが
+成立しなかったことを指す。 社内でよくあるのは次の 3 つで、**どれもブラウザでは
+通るので気づきにくい**:
+
+| 原因 | 見分け方 | 対処 |
+|---|---|---|
+| TLS 傍受プロキシ（Zscaler 等）の社内 CA を Python が知らない | 検証なしなら TLS が通る。 証明書の issuer が社名になる | 社内 CA の PEM を `SSL_CERT_FILE` で指す |
+| 自動構成スクリプト (PAC) でしかプロキシに行けない | `urllib.request.getproxies()` が空。 TCP から落ちる | `HTTPS_PROXY` を明示的に立てる |
+| セキュリティソフトが Maya からの通信だけ遮断 | TCP は通るが TLS が落ちる。 人によって設定が違う | 情シスに例外申請 |
+
+**Python は Windows の証明書ストアを見ない。** ブラウザが通って Maya が通らない
+のはここが効いている（PAC も同様で、`getproxies_registry()` は PAC を評価しない）。
+
+**切り分けのスニペット**（その人の Script Editor で実行してもらう）
+
+```python
+import socket, ssl, sys, urllib.request
+
+host = "api.github.com"
+print("python :", sys.version.split()[0])
+print("openssl:", ssl.OPENSSL_VERSION)
+print("proxies:", urllib.request.getproxies())
+
+for label, ctx in (("tls      ", ssl.create_default_context()),
+                   ("tls(skip)", ssl._create_unverified_context())):
+    try:
+        with socket.create_connection((host, 443), timeout=10) as raw:
+            with ctx.wrap_socket(raw, server_hostname=host) as sock:
+                cert = sock.getpeercert() or {}
+                print(label, ": OK", sock.version(), dict(
+                    x for pair in cert.get("issuer", ()) for x in pair))
+    except Exception as exc:
+        print(label, ": NG", type(exc).__name__, exc)
+```
+
+読み方:
+
+- **どちらも NG** → TCP/TLS の段で塞がれている。 プロキシ設定かセキュリティソフト
+- **`tls` だけ NG で `tls(skip)` が OK** → 証明書の信頼の問題。 `tls(skip)` の行に
+  出る issuer が社名なら TLS 傍受プロキシで確定
+- **どちらも OK** → 別の原因（`_urlopen` の User-Agent が弾かれている等）
+
+**対処**
+証明書の問題なら、社内 CA の PEM を置いて Maya の Python に教える:
+
+```python
+import os
+os.environ["SSL_CERT_FILE"] = r"C:\path\to\corp-ca.pem"   # install.py より前に
+```
+
+**検証を切る回避（`ssl._create_unverified_context` を既定にする）は入れていない。**
+配布物が中間者に差し替えられても気づけなくなり、社内配布ツールでそれをやると
+被害が広がる。 切り分け用に手元で 1 回使うのは構わないが、`install.py` には
+残さない。
+
+**根本的な逃げ道はオフライン インストール。** ハブは GitHub に届かないと
+**「隣のフォルダから入れますか？」と確認を出す**（`_offline_fallback`）。
+ブラウザで ZIP を落として展開し、**その中の** `install.py` をドラッグ&ドロップ
+すれば、ネットワークに一切触れずに入る。 ネットワーク側の解決を待たずに
+作業を止めないための経路なので、まずこれを案内する。
+
+**黙ってローカルに切り替えないこと。** 隣のフォルダが最新とは限らず、
+「更新したつもりで古い版が入っていた」は実機で最も厄介な事故になる。
+
+---
+
 ## 2. 成功パターン ─ 「ホットアップデート可能な Maya ツール」の標準構成
 
 上の全ての落とし穴を回避した、再利用可能な最終構成:

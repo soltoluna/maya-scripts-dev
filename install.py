@@ -81,6 +81,18 @@ _ALLOWED_SUFFIXES = (".py", ".json", ".png", ".svg", ".ui", ".txt", ".md")
 
 _USE_LOCAL_ENV = "MAYA_TOOLS_USE_LOCAL"
 
+# GitHub に届かないときの案内。 社内ネットワークでは TLS 傍受プロキシ・
+# 自動構成スクリプト (PAC)・セキュリティソフトのどれかで **Maya の Python だけが
+# 外に出られない**ことがある（ブラウザは通るので気づきにくい）。 その場合でも
+# ブラウザで ZIP を落としてあればオフラインで入れられる
+_OFFLINE_HINT = (
+    "ブラウザで次を開いて ZIP をダウンロードし、展開してください:\n"
+    "  https://github.com/%s/%s/archive/refs/heads/%s.zip\n\n"
+    "展開した**フォルダの中にある** install.py を Maya のビューポートへ\n"
+    "ドラッグ&ドロップすると、GitHub に接続せずにインストールできます。\n"
+    "（install.py だけを取り出すとオフラインでは入りません）"
+    % (_GITHUB_OWNER, _GITHUB_REPO, _GITHUB_BRANCH))
+
 
 def _log(message):
     print("[%s] %s" % (_LOG, message))
@@ -240,6 +252,44 @@ def _local_tools(here):
             full = os.path.join(root, name)
             paths.append(os.path.relpath(full, here).replace(os.sep, "/"))
     return _discover_tools(paths)
+
+
+def _offline_fallback(exc, here):
+    """GitHub に届かないとき、install.py の隣から入れられるか尋ねる。
+
+    **黙ってローカルに切り替えない。** 隣のフォルダの中身が最新とは限らず、
+    「更新したつもりで古い版が入っていた」は実機で最も厄介な事故になるため、
+    必ず確認を出して利用者に選ばせる。
+
+    隣にツールが無ければ（install.py 単体を保存した場合）、ZIP を落とす
+    手順を添えて諦める。
+    """
+    _log("GitHub への接続に失敗: %s" % (exc,))
+    tools = _local_tools(here) if os.path.isdir(here) else {}
+
+    if not tools:
+        raise RuntimeError(
+            "GitHub に接続できませんでした。\n  %s\n\n%s"
+            % (exc, _OFFLINE_HINT))
+
+    from maya import cmds
+
+    proceed = "オフラインで入れる"
+    answer = cmds.confirmDialog(
+        title="Maya Tools",
+        message=("GitHub に接続できませんでした。\n  %s\n\n"
+                 "install.py の隣に %d 本のツールが見つかりました。\n"
+                 "このフォルダの中身を**そのまま**インストールしますか？\n\n"
+                 "※ 最新かどうかは、このフォルダをいつ取得したか次第です。"
+                 % (exc, len(tools))),
+        button=[proceed, "キャンセル"],
+        defaultButton=proceed, cancelButton="キャンセル",
+        dismissString="キャンセル")
+    if answer != proceed:
+        raise RuntimeError("インストールを中止しました（GitHub へ接続できず）。")
+
+    _log("offline install from %s" % (here,))
+    return tools
 
 
 def _collect_sources(sha, tools, here=None):
@@ -452,13 +502,22 @@ def install():
         sha, tools = "(local)", _local_tools(here)
         sources = _collect_sources(sha, tools, here=here)
     else:
-        sha = _resolve_latest_sha()
-        tools = _discover_tools(_fetch_tree(sha))
-        if not tools:
-            raise RuntimeError("配布対象のツールが 1 本も見つからない "
-                               "（<名前>/<名前>/__init__.py の形になっているか）")
-        _log("found %d tool(s): %s" % (len(tools), ", ".join(sorted(tools))))
-        sources = _collect_sources(sha, tools)   # 全部揃えてから
+        try:
+            sha = _resolve_latest_sha()
+            tools = _discover_tools(_fetch_tree(sha))
+            if not tools:
+                raise RuntimeError(
+                    "配布対象のツールが 1 本も見つからない "
+                    "（<名前>/<名前>/__init__.py の形になっているか）")
+            _log("found %d tool(s): %s"
+                 % (len(tools), ", ".join(sorted(tools))))
+            sources = _collect_sources(sha, tools)   # 全部揃えてから
+        except Exception as exc:
+            # 社内ネットワークでは Maya の Python だけが外に出られないことが
+            # ある。 生のトレースバックで終わらせず、逃げ道を出す
+            sha = "(local)"
+            tools = _offline_fallback(exc, here)
+            sources = _collect_sources(sha, tools, here=here)
 
     # 旧バージョンは書き込む前に読む
     previous = {name: _read_installed_constant(user_scripts, name, "__version__")
