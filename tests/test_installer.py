@@ -26,7 +26,7 @@ import unittest
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 INSTALLER = REPO_ROOT / "install.py"
 
-EXCLUDED_DIRS = {"docs", "tools", "tests"}
+EXCLUDED_DIRS = {"docs", "tools", "tests", "dist"}
 
 
 def _load_installer():
@@ -202,6 +202,67 @@ class OfflineFallbackCase(unittest.TestCase):
     def test_the_hint_points_at_the_configured_repo(self):
         self.assertIn(hub._GITHUB_OWNER, hub._OFFLINE_HINT)
         self.assertIn(hub._GITHUB_REPO, hub._OFFLINE_HINT)
+
+
+class OfflineBundleCase(unittest.TestCase):
+    """1 本だけをオフラインで配るバンドル（`tools/make_bundle.py`）。
+
+    ここが壊れると**バンドルなのに GitHub を見に行き、全ツールが入る**。
+    渡した相手の環境で起きるので、こちらからは見えない。
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.here = pathlib.Path(self.tmp.name)
+
+    def _make_bundle(self, *names):
+        if str(REPO_ROOT / "tools") not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import make_bundle
+        make_bundle.build(list(names), self.here, make_zip=False)
+        return next(p for p in self.here.iterdir() if p.is_dir())
+
+    def test_marker_switches_the_hub_offline(self):
+        self.assertIsNone(hub._offline_reason(str(self.here)))
+        (self.here / hub._OFFLINE_MARKER).write_text("x", encoding="utf-8")
+        self.assertEqual(hub._offline_reason(str(self.here)),
+                         hub._OFFLINE_MARKER)
+
+    def test_env_var_still_works(self):
+        import os
+        os.environ[hub._USE_LOCAL_ENV] = "1"
+        self.addCleanup(os.environ.pop, hub._USE_LOCAL_ENV, None)
+        self.assertTrue(hub._offline_reason(str(self.here)))
+
+    def test_a_missing_folder_is_not_offline(self):
+        self.assertIsNone(
+            hub._offline_reason(str(self.here / "does_not_exist")))
+
+    def test_a_bundle_carries_the_marker_and_the_hub(self):
+        root = self._make_bundle("color_override")
+        self.assertTrue((root / "install.py").is_file())
+        self.assertTrue((root / hub._OFFLINE_MARKER).is_file(),
+                        "マーカーが無いとバンドルが GitHub を見に行く")
+        self.assertEqual(hub._offline_reason(str(root)), hub._OFFLINE_MARKER)
+
+    def test_a_bundle_contains_only_the_requested_tool(self):
+        """**1 本だけ渡す**が成立していること。"""
+        root = self._make_bundle("color_override")
+        self.assertEqual(sorted(hub._local_tools(str(root))),
+                         ["color_override"])
+
+    def test_a_bundle_ships_every_file_the_hub_would_install(self):
+        root = self._make_bundle("color_override")
+        bundled = hub._local_tools(str(root))["color_override"]
+        source = hub._local_tools(str(REPO_ROOT))["color_override"]
+        self.assertEqual(sorted(bundled), sorted(source),
+                         "バンドルに入っていないファイルがある")
+
+    def test_an_unknown_tool_is_refused(self):
+        with self.assertRaises(SystemExit):
+            self._make_bundle("no_such_tool")
 
 
 class EntryPointCase(unittest.TestCase):

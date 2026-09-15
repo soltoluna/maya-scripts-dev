@@ -81,6 +81,15 @@ _ALLOWED_SUFFIXES = (".py", ".json", ".png", ".svg", ".ui", ".txt", ".md")
 
 _USE_LOCAL_ENV = "MAYA_TOOLS_USE_LOCAL"
 
+# **オフライン配布バンドルの合図。** このファイルが install.py の隣にあると、
+# ハブは GitHub を一切見ず、隣のフォルダの中身だけをインストールする。
+#
+# 環境変数（`_USE_LOCAL_ENV`）だと受け取った人が Maya で先に Python を
+# 実行しないといけない。 ファイルなら**ドラッグ&ドロップするだけ**で済む。
+# 開発用のリポジトリには置かないので、普段の配布は今までどおり GitHub から。
+# バンドルは `python tools\make_bundle.py <ツール名>` で作る
+_OFFLINE_MARKER = "maya_tools_offline.txt"
+
 # GitHub に届かないときの案内。 社内ネットワークでは TLS 傍受プロキシ・
 # 自動構成スクリプト (PAC)・セキュリティソフトのどれかで **Maya の Python だけが
 # 外に出られない**ことがある（ブラウザは通るので気づきにくい）。 その場合でも
@@ -252,6 +261,23 @@ def _local_tools(here):
             full = os.path.join(root, name)
             paths.append(os.path.relpath(full, here).replace(os.sep, "/"))
     return _discover_tools(paths)
+
+
+def _offline_reason(here):
+    """ネットワークを使わずに入れる指定があるか。 理由の文字列、無ければ None。
+
+    2 通り受け付ける:
+
+    * `maya_tools_offline.txt` が install.py の隣にある（配布バンドル）
+    * 環境変数 `MAYA_TOOLS_USE_LOCAL=1`（開発中の動作確認用）
+    """
+    if not os.path.isdir(here):
+        return None
+    if os.path.isfile(os.path.join(here, _OFFLINE_MARKER)):
+        return _OFFLINE_MARKER
+    if os.environ.get(_USE_LOCAL_ENV) == "1":
+        return "%s=1" % (_USE_LOCAL_ENV,)
+    return None
 
 
 def _offline_fallback(exc, here):
@@ -497,9 +523,18 @@ def install():
         os.makedirs(user_scripts)
 
     here = os.path.dirname(os.path.abspath(globals().get("__file__") or "."))
-    if os.environ.get(_USE_LOCAL_ENV) == "1" and os.path.isdir(here):
-        _log("%s=1 -> using local checkout %s" % (_USE_LOCAL_ENV, here))
+    reason = _offline_reason(here)
+    if reason:
+        _log("%s -> ネットワークを使わず %s から入れる" % (reason, here))
         sha, tools = "(local)", _local_tools(here)
+        if not tools:
+            raise RuntimeError(
+                "オフライン指定ですが、install.py の隣にツールが "
+                "見つかりません。\n  %s\n\n"
+                "`<名前>/<名前>/__init__.py` の形のフォルダが必要です "
+                "（ZIP を展開した中の install.py をドラッグしてください）。"
+                % (here,))
+        _log("found %d tool(s): %s" % (len(tools), ", ".join(sorted(tools))))
         sources = _collect_sources(sha, tools, here=here)
     else:
         try:

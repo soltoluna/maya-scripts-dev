@@ -73,7 +73,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 # **標準セットの目印（install.py か同名パッケージ）があるものだけ**を
 # 対象にする。 目印が無いフォルダ＝標準セット化前の既存スクリプトで、
 # 検査対象外（消さずに一覧だけ出す）
-EXCLUDED_DIRS = {"docs", "tools", "tests"}
+EXCLUDED_DIRS = {"docs", "tools", "tests", "dist"}
 TARGET_PYTHON = (3, 10)         # Maya 2024（下限）。 CLAUDE.md「環境」と揃える
 PLACEHOLDERS = ("YOUR_GITHUB_USERNAME", "YOUR_REPO_NAME", "OWNER", "REPO")
 

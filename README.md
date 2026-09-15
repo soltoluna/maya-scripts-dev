@@ -18,6 +18,32 @@
 足して配布リストへの追記を忘れる事故が起きない**
 （[`docs/MAYA_HOT_UPDATE_PATTERNS.md`](docs/MAYA_HOT_UPDATE_PATTERNS.md) §1-10）。
 
+## 1 本だけ渡す / オフラインで配る
+
+普段の配布は `install.py` 1 本で**全ツールがまとめて入る**。 次のどちらかの
+ときは、**指定したツールだけを含むオフライン用の ZIP** を作って渡す。
+
+* 1 本だけ渡したい（他のツールまで押しつけたくない）
+* 相手の Maya が GitHub に届かない（下の節）
+
+```powershell
+python tools\make_bundle.py color_override          # dist\color_override_0.3.0_offline.zip
+python tools\make_bundle.py color_override unload_reference_delete
+python tools\make_bundle.py --all
+```
+
+受け取った人は **ZIP を展開して、中の `install.py` をビューポートへ
+ドラッグ&ドロップするだけ**。 環境変数も Script Editor も要らず、
+ネットワークにも接続しない。
+
+仕掛けは `install.py` の隣に置かれる **`maya_tools_offline.txt`** 1 枚で、
+これがあるとハブは GitHub を見ずに隣のフォルダだけを配る。
+出力先の `dist/` は `.gitignore` 済み（ビルド成果物なのでコミットしない）。
+
+> **更新について**: バンドルから入れたツールの「GitHub から更新」ボタンは、
+> **相手が GitHub に届くなら動くが、そのとき全ツールが入る**。 1 本だけ渡した
+> 意図を保ちたいなら、更新も新しい ZIP を渡す運用にすること。
+
 ## GitHub に接続できないとき（社内プロキシ・セキュリティソフト）
 
 社内ネットワークでは、**ブラウザは通るのに Maya の Python だけが外に出られない**
@@ -30,6 +56,10 @@
 ```
 
 **その場合はオフラインで入れられる。** ネットワーク側の解決を待たなくてよい。
+配る側が上の `make_bundle.py` で ZIP を作って渡すのが確実（相手はドラッグ
+&ドロップするだけで、確認ダイアログも出ない）。
+
+相手が自分で何とかする場合は次の手順でも入る:
 
 1. ブラウザで
    [リポジトリの ZIP](https://github.com/soltoluna/maya-scripts-dev/archive/refs/heads/main.zip)
@@ -78,6 +108,9 @@
 # 標準セットの充足・配布設定・バージョン同期を検査する
 python tools\check_tools.py --list-missing
 python tools\check_tools.py                  # ERROR があれば終了コード 1
+
+# 指定したツールだけのオフライン配布 ZIP を作る（dist/ に出る）
+python tools\make_bundle.py <ツール名>
 
 # ツールのテストを走らせる（Maya 不要）
 cd <ツール名>\tests

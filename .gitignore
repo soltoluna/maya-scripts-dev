@@ -6,3 +6,5 @@ __pycache__/
 # Maya が作業中に吐くもの（このリポジトリに入る想定は無いが保険）
 *.ma.swatches
 *.mayaSwatches/
+# tools/make_bundle.py の出力（ビルド成果物）
+dist/
