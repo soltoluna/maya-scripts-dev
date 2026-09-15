@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import doctest
+import json
 import unittest
 
 import _bootstrap  # noqa: F401  （maya スタブの注入。 他の import より前）
@@ -147,13 +148,6 @@ class RecordCase(unittest.TestCase):
                          ["b", "a", "c"])
         self.assertEqual(core.unique(None), [])
 
-    def test_format_row(self):
-        self.assertEqual(core.format_row(self.records[0]),
-                         "head_geo   #FF0000")
-
-    def test_format_row_survives_a_missing_color(self):
-        self.assertEqual(core.format_row({"target": "a"}), "a   #000000")
-
     def test_match_by_full_path(self):
         found = core.match_records(self.records, ["|grp|body_geo"])
         self.assertEqual([rec["target"] for rec in found], ["|grp|body_geo"])
@@ -290,10 +284,144 @@ class PeekCase(unittest.TestCase):
         found = core.match_records([record], ["|g", "|g|a|aShape"])
         self.assertEqual(found, [record])
 
-    def test_format_row_marks_disabled_records(self):
-        record = {"target": "|grp|a", "color": (0.0, 0.0, 1.0),
-                  "enabled": False}
-        self.assertEqual(core.format_row(record), "a   #0000FF   (off)")
+
+class SetCase(unittest.TestCase):
+    """セット — まとめて掛けたものを 1 行に畳む単位。"""
+
+    def test_new_name_counts_up_from_the_highest(self):
+        """空き番号を埋めると、片付けたセットと同名の別物ができる。"""
+        self.assertEqual(core.new_set_name([]), "Set 1")
+        self.assertEqual(core.new_set_name(["Set 1", "Set 3"]), "Set 4")
+
+    def test_new_name_ignores_renamed_sets(self):
+        self.assertEqual(core.new_set_name(["hair", "body 2"]), "Set 1")
+
+    def test_normalize_collapses_whitespace(self):
+        self.assertEqual(core.normalize_set_name("  hair   check "),
+                         "hair check")
+
+    def test_normalize_falls_back(self):
+        self.assertEqual(core.normalize_set_name(""), core.UNNAMED_SET)
+        self.assertEqual(core.normalize_set_name(None, "Set 9"), "Set 9")
+
+    def test_normalize_caps_the_length(self):
+        self.assertLessEqual(len(core.normalize_set_name("x" * 200)), 64)
+
+    def test_group_counts_members_not_records(self):
+        """1 行に「何オブジェクトか」を出すため。"""
+        sets = core.group_by_set([
+            {"set": "a", "members": ["x", "y"], "color": (1.0, 0.0, 0.0)},
+            {"set": "a", "members": ["z"], "color": (1.0, 0.0, 0.0)},
+        ])
+        self.assertEqual(len(sets), 1)
+        self.assertEqual(sets[0]["count"], 3)
+
+    def test_records_without_a_set_go_to_unnamed(self):
+        """v0.3.0 以前に掛けたものを開いても行方不明にしない。"""
+        sets = core.group_by_set([{"members": ["x"], "color": (0, 0, 0)}])
+        self.assertEqual(sets[0]["name"], core.UNNAMED_SET)
+
+    def test_group_keeps_first_seen_order(self):
+        sets = core.group_by_set([{"set": "b", "members": ["1"]},
+                                  {"set": "a", "members": ["2"]},
+                                  {"set": "b", "members": ["3"]}])
+        self.assertEqual([s["name"] for s in sets], ["b", "a"])
+
+    def test_a_set_is_enabled_when_any_record_shows(self):
+        sets = core.group_by_set([{"set": "a", "members": [], "enabled": False},
+                                  {"set": "a", "members": ["x"],
+                                   "enabled": True}])
+        self.assertTrue(sets[0]["enabled"])
+
+    def test_items_drop_records_without_a_target(self):
+        self.assertEqual(core.set_items_from_records([{"color": (1, 0, 0)}]),
+                         [])
+
+    def test_swatches_collapse_a_single_colour(self):
+        """12 個に 1 色を掛けたセットは見本 1 個で足りる。"""
+        shown, overflow = core.swatch_colors([(1.0, 0.0, 0.0)] * 12)
+        self.assertEqual((shown, overflow), ([(1.0, 0.0, 0.0)], 0))
+
+    def test_swatches_report_the_overflow(self):
+        colors = core.distinct_colors(20)
+        shown, overflow = core.swatch_colors(colors, limit=8)
+        self.assertEqual((len(shown), overflow), (8, 12))
+
+    def test_swatches_reject_a_useless_limit(self):
+        with self.assertRaises(ValueError):
+            core.swatch_colors([(1, 0, 0)], limit=0)
+
+
+class CatalogCase(unittest.TestCase):
+    """控え（シーンの隣に置く JSON）。"""
+
+    def setUp(self):
+        self.sets = [{"name": "hair",
+                      "items": [{"target": "|a", "color": (1.0, 0.0, 0.0)},
+                                {"target": "|b", "color": (0.0, 0.5, 1.0)}]}]
+
+    def test_round_trip(self):
+        text = core.catalog_to_text(self.sets, scene="C:/x/s.ma",
+                                    tool_version="0.4.0")
+        self.assertEqual(core.catalog_from_text(text), self.sets)
+
+    def test_the_file_is_readable_by_a_human(self):
+        text = core.catalog_to_text(self.sets)
+        self.assertIn("\n", text, "1 行に潰れている（手で直せない）")
+        self.assertIn('"hair"', text)
+
+    def test_broken_items_are_dropped_but_the_rest_survives(self):
+        """人が手で編集しうるファイルなので、1 か所壊れても捨てない。"""
+        text = core.catalog_to_text(
+            [{"name": "s", "items": [{"target": "|a", "color": (1, 0, 0)}]}])
+        payload = json.loads(text)
+        payload["sets"][0]["items"].append({"target": "|b", "color": [1, 0]})
+        payload["sets"][0]["items"].append({"target": "", "color": [1, 0, 0]})
+        payload["sets"][0]["items"].append("nonsense")
+        parsed = core.catalog_from_text(json.dumps(payload))
+        self.assertEqual([i["target"] for i in parsed[0]["items"]], ["|a"])
+
+    def test_a_set_with_no_usable_item_is_dropped(self):
+        parsed = core.catalog_from_text(json.dumps(
+            {"tool": "color_override", "sets": [{"name": "x", "items": []}]}))
+        self.assertEqual(parsed, [])
+
+    def test_another_tools_file_is_refused(self):
+        with self.assertRaises(ValueError):
+            core.catalog_from_text('{"tool": "something_else", "sets": []}')
+
+    def test_a_newer_format_is_refused(self):
+        """読めない形式を黙って無視すると、控えを消したように見える。"""
+        with self.assertRaises(ValueError):
+            core.catalog_from_text('{"format": 99, "sets": []}')
+
+    def test_garbage_is_refused(self):
+        for bad in ("", "not json", "[]", "3"):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    core.catalog_from_text(bad)
+
+    def test_merge_replaces_by_name_and_appends_the_rest(self):
+        merged = core.merge_catalog(
+            [{"name": "a", "items": [1]}, {"name": "b", "items": [2]}],
+            [{"name": "b", "items": [3]}, {"name": "c", "items": [4]}])
+        self.assertEqual([s["name"] for s in merged], ["a", "b", "c"])
+        self.assertEqual(merged[1]["items"], [3])
+
+    def test_merge_of_nothing(self):
+        self.assertEqual(core.merge_catalog(None, None), [])
+
+    def test_backup_path_sits_next_to_the_scene(self):
+        self.assertEqual(core.backup_path_for("C:/work/shot010.ma"),
+                         "C:/work/shot010.color_override.json")
+
+    def test_backup_path_normalises_separators(self):
+        self.assertEqual(core.backup_path_for("C:\\work\\shot010.mb"),
+                         "C:/work/shot010.color_override.json")
+
+    def test_backup_path_needs_a_saved_scene(self):
+        self.assertIsNone(core.backup_path_for(""))
+        self.assertIsNone(core.backup_path_for(None))
 
 
 if __name__ == "__main__":

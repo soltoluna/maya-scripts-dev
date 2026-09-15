@@ -2,25 +2,25 @@
 """Color Override — `maya.cmds` による UI と、シェーダー割り当ての操作。
 
 ここは「値を集める → `core` に渡す → 結果を `cmds` に流す」に保つ。
-色の作り方・16 進の解釈・ノード名の組み立て・記録の突き合わせは
-すべて `core.py`（Maya 非依存）にある。
+色の作り方・16 進の解釈・ノード名の組み立て・セットの畳み方・控えの
+読み書きは、すべて `core.py`（Maya 非依存）にある。
 
 ## オーバーライドの持ち方
 
 対象 1 つにつき `surfaceShader` + `shadingEngine` を 1 組作り、**シェーダー側に
-元の shadingEngine 名を文字列属性で書き込む**。 セッション中の Python 辞書に
-持たないのは、シーンを保存して開き直したあとも Restore を効かせるため。
+復元用の情報を文字列属性で書き込む**。 セッション中の Python 辞書に持たないのは、
+シーンを保存して開き直したあとも Restore を効かせるため。
 
     ntk_color_override_<対象名>_SHD   surfaceShader（outColor が表示色）
       .ntkColorOverrideOriginal       元の SG（旧形式・管理対象の目印）
       .ntkColorOverrideTarget         掛けた時点の対象ノード名（表示用）
       .ntkColorOverrideMembers        掛けた相手（シェイプ）
       .ntkColorOverrideOriginals      **それぞれの戻し先** ← 復元の情報源
+      .ntkColorOverrideSet            所属するセット名 ← 一覧を畳む単位
     ntk_color_override_<対象名>_SG    上をつないだ shadingEngine
 
 **戻し先はメンバーごとに持つ。** グループノードに掛けると中のシェイプは
-別々のマテリアルを持ちうるので、1 件につき 1 つでは戻せない（v0.2.0 までは
-1 つしか持たず、グループに掛けると全部グレーになった）。
+別々のマテリアルを持ちうるので、1 件につき 1 つでは戻せない。
 
 `surfaceShader` を使うのはライティングに影響されないフラットな色になるため。
 陰影が乗らないぶん、同系色のオブジェクトの境界（＝貫通している箇所）が
@@ -29,16 +29,24 @@
 **管理対象の判別は名前ではなく `.ntkColorOverrideOriginal` 属性の有無で行う。**
 ユーザーがノードをリネームしても追跡できる。
 
-## 一時解除（peek）と Restore の違い
+## 3 つの状態
 
-    Hide / Show Colors   対象を元の SG に戻すだけ。 ノードは残すので掛け直せる
-    Restore              元の SG に戻したうえでノードごと削除する
+    Hide / Show    対象を元の SG に戻すだけ。 ノードは残すので掛け直せる
+    Restore        元の SG に戻し、ノードごと削除する（シーンがきれいになる）
+    控え (JSON)    Restore で消える前に、シーンの隣へ書き出しておく
+
+**Restore はシーンからノードを消す。** それがこのツールの方針
+（確認が終わったらシーンに何も残さない）だが、そのままでは同じ色分けに
+二度と戻れない。 だから **Restore の直前に必ず控えを書き出し、一覧には
+「まだ掛かっていないセット」として出し続ける**。 いつでも Apply で戻せる。
 
 **解除中かどうかのフラグは持たない。** shadingEngine にメンバーが居るかどうかが
 そのまま状態なので、Maya 側で手作業に割り当てを変えられても表示と食い違わない。
 """
 
 from __future__ import annotations
+
+import os
 
 from maya import cmds
 
@@ -70,12 +78,21 @@ _ATTR_TARGET = NAMESPACE + "ColorOverrideTarget"
 _ATTR_MEMBERS = NAMESPACE + "ColorOverrideMembers"
 
 # メンバーと 1 対 1 で対応する戻し先。 グループに掛けると中のシェイプは
-# 別々のマテリアルを持ちうるので、_ATTR_ORIGINAL の 1 つでは戻せない。
-# v0.2.0 までのシーンにはこの属性が無いので、その場合は _ATTR_ORIGINAL で埋める
+# 別々のマテリアルを持ちうるので、_ATTR_ORIGINAL の 1 つでは戻せない
 _ATTR_ORIGINALS = NAMESPACE + "ColorOverrideOriginals"
+
+# 所属セット名。 一覧を畳む単位で、これが無い記録（v0.3.0 以前）は Unnamed へ
+_ATTR_SET = NAMESPACE + "ColorOverrideSet"
 
 # シェーダーを持たないオブジェクトを戻すときの行き先（Maya の既定）
 _DEFAULT_SG = "initialShadingGroup"
+
+# 控えの置き場所。 シーンと同じ場所・同じ名前にするので、どのシーンのものか
+# 一目で分かり、要らなくなったら消せる
+_BACKUP_SUFFIX = ".color_override.json"
+
+# 1 行に並べる色見本の上限。 これを超えたら `+N` にする
+_SWATCH_LIMIT = 8
 
 # 「全メッシュ」でこの数を超えたら一度確認する。 1 オブジェクト = 2 ノードなので、
 # 大きいシーンで何も聞かずに走ると戻すのも一苦労になる
@@ -84,7 +101,6 @@ _BULK_CONFIRM_THRESHOLD = 50
 _DEFAULT_COLOR = core.color_at(0)
 
 _CTRL = {}        # コントロール名の控え。 show() のたびに作り直す
-_ROWS = []        # 一覧に出している記録。 行番号 → 記録の対応表
 
 
 # --------------------------------------------------------------------------- #
@@ -154,8 +170,7 @@ def _collect_records():
         legacy = _read_attr(shader, _ATTR_ORIGINAL, _DEFAULT_SG)
 
         # **元の SG はメンバーごとに控える**（グループに掛けると中の
-        # シェイプは別々のマテリアルを持ちうる）。 v0.2.0 までのシーンには
-        # この属性が無いので、旧形式の単一値で埋める
+        # シェイプは別々のマテリアルを持ちうる）
         known = dict(core.align_originals(
             stored, core.split_members(_read_attr(shader, _ATTR_ORIGINALS)),
             legacy))
@@ -168,6 +183,7 @@ def _collect_records():
             "originals": [known.get(name, legacy) for name in live],
             "target": (_read_attr(shader, _ATTR_TARGET)
                        or (live[0] if live else shader)),
+            "set": _read_attr(shader, _ATTR_SET),
             "color": tuple(color[0])[:3],
             "members": live,
             "enabled": bool(members),
@@ -182,6 +198,19 @@ def _selected_objects():
                                objectsOnly=True) or [])
 
 
+def _selection_with_shapes():
+    """選択物と、その下にあるシェイプをまとめて返す。
+
+    記録が抱えているのはシェイプなので、グループやトランスフォームを
+    選んだままでは突き合わせられない。
+    """
+    selection = _selected_objects()
+    names = list(selection)
+    for node in selection:
+        names.extend(_shapes_of(node))
+    return core.unique(names)
+
+
 def _all_mesh_objects():
     """シーン内の全メッシュを、その親トランスフォームの形で返す。"""
     nodes = []
@@ -189,6 +218,147 @@ def _all_mesh_objects():
         parents = cmds.listRelatives(shape, parent=True, fullPath=True) or []
         nodes.append(parents[0] if parents else shape)
     return core.unique(nodes)
+
+
+# --------------------------------------------------------------------------- #
+# 控え（シーンの隣の JSON）
+# --------------------------------------------------------------------------- #
+
+def _scene_path():
+    try:
+        return cmds.file(q=True, sceneName=True) or ""
+    except Exception:
+        return ""
+
+
+def _backup_path():
+    """いま開いているシーンに対応する控えのパス（未保存なら None）。"""
+    return core.backup_path_for(_scene_path(), _BACKUP_SUFFIX)
+
+
+def _read_backup(path=None):
+    """控えを読む。 無ければ空、壊れていれば警告して空。"""
+    path = path or _backup_path()
+    if not path or not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return core.catalog_from_text(handle.read())
+    except (OSError, ValueError) as exc:
+        cmds.warning("[%s] 控えを読めませんでした（%s）: %s"
+                     % (_PACKAGE, path, exc))
+        return []
+
+
+def _write_backup(sets, path):
+    """控えを書く。 書けたらパス、書けなければ例外。"""
+    text = core.catalog_to_text(sets, scene=_scene_path(),
+                                tool_version=__version__)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    return path
+
+
+def _ask_backup_path():
+    """シーンが未保存のとき、控えをどうするか尋ねる。
+
+    戻り値は `パス` / `None`（控えずに進む）/ `False`（中止）。
+    """
+    keep = "保存先を選ぶ"
+    skip = "控えずに片付ける"
+    answer = cmds.confirmDialog(
+        title="Color Override",
+        message=("シーンが未保存なので、色分けの控えを置く場所が決まりません。\n"
+                 "控えずに片付けると、同じ色分けには戻せません。"),
+        button=[keep, skip, "キャンセル"],
+        defaultButton=keep, cancelButton="キャンセル",
+        dismissString="キャンセル")
+    if answer == skip:
+        return None
+    if answer != keep:
+        return False
+    chosen = cmds.fileDialog2(fileFilter="JSON (*.json)", dialogStyle=2,
+                              fileMode=0, caption="色分けの控えを保存") or []
+    return chosen[0] if chosen else False
+
+
+def _backup_sets(sets):
+    """セットを控えに取り込む。 `パス` / `None`（控えなかった）/ `False`（中止）。
+
+    **Restore はシーンからノードを消す。** 消す前にここを通らないと、
+    同じ色分けに二度と戻れない。 だから書けなかったときは `False` を返して
+    片付けそのものを止める（消してから「書けませんでした」では遅い）。
+    """
+    payload = [{"name": entry["name"], "items": entry.get("items") or []}
+               for entry in sets if entry.get("items")]
+    if not payload:
+        return None
+
+    path = _backup_path()
+    if not path:
+        path = _ask_backup_path()
+        if path is None or path is False:
+            return path
+
+    try:
+        return _write_backup(core.merge_catalog(_read_backup(path), payload),
+                             path)
+    except OSError as exc:
+        cmds.confirmDialog(
+            title="Color Override",
+            message=("色分けの控えを書けませんでした:\n%s\n\n%s\n\n"
+                     "控えられないので片付けを中止します。" % (path, exc)),
+            button=["OK"])
+        return False
+
+
+def _forget_backup(name):
+    """控えから 1 セット消す。"""
+    path = _backup_path()
+    if not path:
+        return
+    remaining = [entry for entry in _read_backup(path)
+                 if entry["name"] != name]
+    try:
+        _write_backup(remaining, path)
+    except OSError as exc:
+        cmds.warning("[%s] 控えを更新できませんでした: %s" % (_PACKAGE, exc))
+
+
+# --------------------------------------------------------------------------- #
+# セット（一覧の単位）
+# --------------------------------------------------------------------------- #
+
+def _all_sets():
+    """一覧に出すもの — **掛かっているセット + 控えに残っているセット**。
+
+    Restore したセットが控えの行として残り続けるので、後から Apply で
+    呼び戻せる。 これが「Restore All した後でも元に戻せる」の実体。
+    """
+    applied = core.group_by_set(_collect_records())
+    known = {entry["name"] for entry in applied}
+
+    entries = list(applied)
+    for backup in _read_backup():
+        if backup["name"] in known:
+            continue
+        entries.append({
+            "name": backup["name"],
+            "applied": False,
+            "enabled": False,
+            "records": [],
+            "items": backup["items"],
+            "colors": [item["color"] for item in backup["items"]],
+            "count": len(backup["items"]),
+        })
+    return entries
+
+
+def _find_set(name):
+    for entry in _all_sets():
+        if entry["name"] == name:
+            return entry
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -249,8 +419,7 @@ def _release_members(records, index, shapes):
 
     **1 シェイプ = 1 オーバーライド**を保つための後始末。 たとえばグループに
     掛けたあと中の 1 つだけ色を変えると、そのシェイプは新しい記録に移る。
-    外した結果メンバーが 0 になった記録は、シェーダーごと片付ける
-    （空のまま残すと一覧に `(off)` として出続ける）。
+    外した結果メンバーが 0 になった記録は、シェーダーごと片付ける。
     """
     claimed = set(shapes)
     for record in list(records):
@@ -282,14 +451,13 @@ def _release_members(records, index, shapes):
             index.pop(key, None)
 
 
-def _apply_one(node, rgb, records, index, resolve_original):
-    """ノード 1 つに色を掛ける。 既に掛かっていれば色だけ差し替える。
+def _apply_one(node, rgb, set_name, records, index, resolve_original):
+    """ノード 1 つに色を掛ける。 既に掛かっていれば色とセットを差し替える。
 
     `index` は `core.index_by_object()` が作った「対象名 → 記録」の索引。
     **シーンの現在の割り当てを辿らないのが要点**で、一時解除中は対象が元の
     SG に戻っているため、割り当てからは既存のオーバーライドを見つけられない。
-    見つけ損なうと 2 本目のシェーダーを作ってしまい、元のマテリアルの記録が
-    二重になる。
+    見つけ損なうと 2 本目のシェーダーを作ってしまい、記録が二重になる。
 
     グループノードを渡すと、**中のシェイプを全部拾って 1 件の記録にまとめる**。
     戻し先はシェイプごとに控えるので、中身のマテリアルがばらばらでも戻せる。
@@ -299,6 +467,9 @@ def _apply_one(node, rgb, records, index, resolve_original):
     if record:
         cmds.setAttr(record["shader"] + ".outColor", rgb[0], rgb[1], rgb[2],
                      type="double3")
+        # 掛け直したものは新しいセットに移す（1 回の Apply = 1 セット）
+        _write_string(record["shader"], _ATTR_SET, set_name)
+        record["set"] = set_name
         # 一時解除中に色を掛けたなら、見えるように戻す（掛けたのに何も
         # 変わらないほうが分かりにくい）
         if not record.get("enabled", True):
@@ -318,17 +489,18 @@ def _apply_one(node, rgb, records, index, resolve_original):
     # これから抱えるシェイプを既存の記録から外す（1 シェイプ = 1 記録）
     _release_members(records, index, shapes)
 
-    shader_name, set_name = core.override_node_names(_NODE_PREFIX, node)
+    shader_name, sg_name = core.override_node_names(_NODE_PREFIX, node)
     shader = cmds.shadingNode("surfaceShader", asShader=True, name=shader_name)
-    shading_engine = cmds.sets(name=set_name, renderable=True,
+    shading_engine = cmds.sets(name=sg_name, renderable=True,
                                noSurfaceShader=True, empty=True)
     cmds.connectAttr(shader + ".outColor", shading_engine + ".surfaceShader",
                      force=True)
 
     # _ATTR_ORIGINAL は「このツールが作ったシェーダーか」の目印も兼ねるので、
-    # 旧形式の単一値として必ず書く（v0.2.0 のコードに開かれても壊れない）
+    # 旧形式の単一値として必ず書く
     _write_string(shader, _ATTR_ORIGINAL, originals[0])
     _write_string(shader, _ATTR_TARGET, node)
+    _write_string(shader, _ATTR_SET, set_name)
 
     cmds.setAttr(shader + ".outColor", rgb[0], rgb[1], rgb[2], type="double3")
     cmds.sets(shapes, edit=True, forceElement=shading_engine)
@@ -337,7 +509,7 @@ def _apply_one(node, rgb, records, index, resolve_original):
     # 同じ処理の中で続けて引けるよう、作ったものも索引に足しておく
     record = {"shader": shader, "sg": shading_engine, "original": originals[0],
               "originals": originals, "target": node, "members": shapes,
-              "enabled": True}
+              "set": set_name, "enabled": True}
     records.append(record)
     for name in [node] + shapes:
         index.setdefault(name, record)
@@ -448,74 +620,15 @@ def _set_color(rgb):
 
 
 # --------------------------------------------------------------------------- #
-# 一覧
+# 掛ける
 # --------------------------------------------------------------------------- #
 
-def _refresh_list(*_args):
-    """オーバーライド中の一覧を作り直す。"""
-    ctrl = _CTRL.get("list")
-    if not ctrl or not cmds.textScrollList(ctrl, exists=True):
-        return
-
-    del _ROWS[:]
-    _ROWS.extend(_collect_records())
-
-    cmds.textScrollList(ctrl, edit=True, removeAll=True)
-    for record in _ROWS:
-        cmds.textScrollList(ctrl, edit=True, append=core.format_row(record))
-
-    # 1 件も無いときは「掛かっていない」なので、トグルは押せない状態のまま
-    # 既定のラベルにしておく（Show Colors と出ていて押せないのは紛らわしい）
-    showing = core.any_enabled(_ROWS) if _ROWS else True
-
-    if _CTRL.get("count"):
-        cmds.text(_CTRL["count"], edit=True,
-                  label="Overridden: %d%s"
-                        % (len(_ROWS), "" if showing else "   — 一時解除中"))
-
-    # トグルのラベルは**シーンの実態から**決める。 別にフラグを持つと、
-    # Maya 側で割り当てを手で変えられたときに表示と食い違う
-    if _CTRL.get("toggle"):
-        cmds.button(_CTRL["toggle"], edit=True, enable=bool(_ROWS),
-                    label="Hide Colors" if showing else "Show Colors")
-
-
-def _rows_selected_in_list():
-    """一覧で選ばれている行の記録を返す。"""
-    ctrl = _CTRL.get("list")
-    if not ctrl or not cmds.textScrollList(ctrl, exists=True):
-        return []
-    indices = cmds.textScrollList(ctrl, q=True, selectIndexedItem=True) or []
-    return [_ROWS[i - 1] for i in indices if 0 < i <= len(_ROWS)]
-
-
-# --------------------------------------------------------------------------- #
-# コールバック
-# --------------------------------------------------------------------------- #
-
-def _on_color_changed(*_args):
-    _set_color(_current_color())
-
-
-def _on_hex_changed(*_args):
-    """16 進欄の入力を色に反映する。 読めなければ元の表示に戻す。"""
-    text = cmds.textField(_CTRL["hex"], q=True, text=True)
-    try:
-        rgb = core.parse_hex(text)
-    except ValueError:
-        cmds.warning("[%s] %s は #RRGGBB の形で入れてください。"
-                     % (_PACKAGE, text))
-        cmds.textField(_CTRL["hex"], edit=True,
-                       text=core.to_hex(_current_color()))
-        return
-    _set_color(rgb)
-
-
-def _apply_to(nodes, colors, label):
-    """共通の入口 — 対象と色の組を undo チャンクにまとめて流す。"""
-    if not nodes:
+def _apply_pairs(pairs, label, set_name=None):
+    """`(対象, 色)` の組をまとめて掛ける。 **1 回の呼び出し = 1 セット。**"""
+    pairs = [(node, rgb) for node, rgb in pairs if node]
+    if not pairs:
         cmds.warning("[%s] 対象がありません。" % (_PACKAGE,))
-        return
+        return None
 
     # 既存のオーバーライドは 1 度のスキャンで索引にしておく。 ノードごとに
     # 割り当てを辿ると、対象が増えたときに cmds の往復が効いてくる
@@ -523,13 +636,17 @@ def _apply_to(nodes, colors, label):
     index = core.index_by_object(records)
     resolve_original = _original_resolver(records)
 
+    name = (core.normalize_set_name(set_name) if set_name
+            else core.new_set_name([entry["name"] for entry in _all_sets()]))
+
     def _run():
-        for node, rgb in zip(nodes, colors):
-            _apply_one(node, rgb, records, index, resolve_original)
+        for node, rgb in pairs:
+            _apply_one(node, rgb, name, records, index, resolve_original)
 
     _in_undo_chunk(label, _run)
     _refresh_list()
-    print("[%s] %s: %d object(s)" % (_PACKAGE, label, len(nodes)))
+    print("[%s] %s: %d object(s) -> %s" % (_PACKAGE, label, len(pairs), name))
+    return name
 
 
 def _on_apply_selected(*_args):
@@ -537,14 +654,15 @@ def _on_apply_selected(*_args):
     nodes = _selected_objects()
     rgb = _current_color()
     _set_color(rgb)
-    _apply_to(nodes, [rgb] * len(nodes), "apply color")
+    _apply_pairs([(node, rgb) for node in nodes], "apply color")
 
 
 def _on_random_selected(*_args):
     """選択物に互いに見分けやすい色を振る。"""
     nodes = _selected_objects()
     start = core.next_start_index(_collect_records())
-    _apply_to(nodes, core.distinct_colors(len(nodes), start), "random color")
+    _apply_pairs(list(zip(nodes, core.distinct_colors(len(nodes), start))),
+                 "random color")
 
 
 def _on_random_all(*_args):
@@ -561,12 +679,27 @@ def _on_random_all(*_args):
         if answer != "OK":
             return
     start = core.next_start_index(_collect_records())
-    _apply_to(nodes, core.distinct_colors(len(nodes), start), "random color")
+    _apply_pairs(list(zip(nodes, core.distinct_colors(len(nodes), start))),
+                 "random color")
 
 
-def _restore(records, label):
+# --------------------------------------------------------------------------- #
+# 片付ける / 一時解除
+# --------------------------------------------------------------------------- #
+
+def _restore(records, label, sets=None):
+    """記録を元のマテリアルに戻し、ノードごと片付ける。
+
+    **片付ける前に必ず控えを書き出す。** シーンをきれいにするのがこの操作の
+    目的だが、控えが無いと同じ色分けに戻れない。
+    """
     if not records:
         cmds.warning("[%s] 戻す対象がありません。" % (_PACKAGE,))
+        return
+
+    saved = _backup_sets(sets if sets is not None
+                         else core.group_by_set(records))
+    if saved is False:
         return
 
     def _run():
@@ -576,28 +709,14 @@ def _restore(records, label):
 
     _in_undo_chunk(label, _run)
     _refresh_list()
-    print("[%s] %s: %d object(s)" % (_PACKAGE, label, len(records)))
-
-
-def _selection_with_shapes():
-    """選択物と、その下にあるシェイプをまとめて返す。
-
-    記録が抱えているのはシェイプなので、グループやトランスフォームを
-    選んだままでは突き合わせられない。
-    """
-    selection = _selected_objects()
-    names = list(selection)
-    for node in selection:
-        names.extend(_shapes_of(node))
-    return core.unique(names)
+    print("[%s] %s: %d override(s)%s"
+          % (_PACKAGE, label, len(records),
+             ("  backup: %s" % (saved,)) if saved else "  (控えなし)"))
 
 
 def _on_restore_selected(*_args):
-    """一覧で選んだ行、無ければシーンで選択中のものを元に戻す。"""
-    records = _rows_selected_in_list()
-    if not records:
-        records = core.match_records(_collect_records(),
-                                     _selection_with_shapes())
+    """シーンで選択中のものを含むセットを片付ける。"""
+    records = core.match_records(_collect_records(), _selection_with_shapes())
     _restore(records, "restore")
 
 
@@ -639,12 +758,260 @@ def toggle():
     return _on_toggle()
 
 
-def _on_select_in_scene(*_args):
-    """一覧で選んだ行のオブジェクトをシーンでも選択する。"""
-    targets = [rec["target"] for rec in _rows_selected_in_list()
-               if rec.get("target") and cmds.objExists(rec["target"])]
-    if targets:
-        cmds.select(targets, replace=True)
+# --------------------------------------------------------------------------- #
+# セットごとの操作（一覧の各行）
+# --------------------------------------------------------------------------- #
+
+def _on_set_rename(name, field, *_args):
+    """行の名前欄を編集したとき。 セットに属する全シェーダーに書き戻す。"""
+    new_name = core.normalize_set_name(
+        cmds.textField(field, q=True, text=True), name)
+    if new_name == name:
+        return
+
+    entry = _find_set(name)
+    if entry is None:
+        _refresh_list()
+        return
+
+    if entry["applied"]:
+        def _run():
+            for record in entry["records"]:
+                _write_string(record["shader"], _ATTR_SET, new_name)
+        _in_undo_chunk("rename set", _run)
+    else:
+        # 控えだけのセットは JSON 側を書き換える
+        path = _backup_path()
+        if path:
+            catalog = _read_backup(path)
+            for item in catalog:
+                if item["name"] == name:
+                    item["name"] = new_name
+            try:
+                _write_backup(catalog, path)
+            except OSError as exc:
+                cmds.warning("[%s] 控えを更新できませんでした: %s"
+                             % (_PACKAGE, exc))
+
+    _refresh_list()
+    print("[%s] rename set: %s -> %s" % (_PACKAGE, name, new_name))
+
+
+def _on_set_toggle(name, *_args):
+    """このセットだけ一時的に外す／掛け直す。"""
+    entry = _find_set(name)
+    if entry is None or not entry["applied"]:
+        return
+    records = entry["records"]
+    if entry["enabled"]:
+        _in_undo_chunk("hide set", lambda: _disable_records(records))
+    else:
+        _in_undo_chunk("show set", lambda: _enable_records(records))
+    _refresh_list()
+
+
+def _on_set_select(name, *_args):
+    """セットが抱えているオブジェクトをシーンで選択する。"""
+    entry = _find_set(name)
+    if entry is None:
+        return
+    if entry["applied"]:
+        wanted = [member for record in entry["records"]
+                  for member in record.get("members") or []]
+    else:
+        wanted = [item["target"] for item in entry["items"]]
+    alive = [node for node in core.unique(wanted) if cmds.objExists(node)]
+    if alive:
+        cmds.select(alive, replace=True)
+    else:
+        cmds.warning("[%s] %s のオブジェクトが見つかりません。"
+                     % (_PACKAGE, name))
+
+
+def _on_set_restore(name, *_args):
+    entry = _find_set(name)
+    if entry is None or not entry["applied"]:
+        return
+    _restore(entry["records"], "restore set", sets=[entry])
+
+
+def _on_set_reapply(name, *_args):
+    """控えに残っているセットを掛け直す。
+
+    **戻し先は控えから読まず、そのときの割り当てを見て取り直す。**
+    片付けたあとにマテリアルを差し替えているかもしれないため。
+    """
+    entry = _find_set(name)
+    if entry is None or entry["applied"]:
+        return
+
+    pairs = [(item["target"], item["color"]) for item in entry["items"]
+             if cmds.objExists(item["target"])]
+    missing = len(entry["items"]) - len(pairs)
+    if not pairs:
+        cmds.warning("[%s] %s のオブジェクトが 1 つも見つかりません。"
+                     % (_PACKAGE, name))
+        return
+    if missing:
+        cmds.warning("[%s] %s: %d 個のオブジェクトが見つからないので飛ばします。"
+                     % (_PACKAGE, name, missing))
+    _apply_pairs(pairs, "reapply set", set_name=name)
+
+
+def _on_set_forget(name, *_args):
+    """控えから 1 セット消す（掛かっていないものだけ）。"""
+    answer = cmds.confirmDialog(
+        title="Color Override",
+        message="控えから「%s」を削除します。 元に戻せません。" % (name,),
+        button=["削除", "キャンセル"], defaultButton="キャンセル",
+        cancelButton="キャンセル", dismissString="キャンセル")
+    if answer != "削除":
+        return
+    _forget_backup(name)
+    _refresh_list()
+
+
+# --------------------------------------------------------------------------- #
+# 一覧
+# --------------------------------------------------------------------------- #
+
+def _build_swatches(colors):
+    """色見本を横に並べる。 **カラーコードではなく色そのものを出す。**
+
+    16 進の値はツールチップに残す（必要なときだけ読めればよい）。
+    """
+    shown, overflow = core.swatch_colors(colors, _SWATCH_LIMIT)
+    columns = max(len(shown), 1) + (1 if overflow else 0)
+    cmds.rowLayout(numberOfColumns=columns, height=18)
+    if not shown:
+        cmds.text(label="")
+    for rgb in shown:
+        cmds.canvas(width=10, height=14, rgbValue=rgb,
+                    annotation=core.to_hex(rgb))
+    if overflow:
+        cmds.text(label="+%d" % (overflow,), fn="smallPlainLabelFont")
+    cmds.setParent("..")
+
+
+def _build_set_row(entry):
+    """一覧の 1 行 = 1 セット。"""
+    name = entry["name"]
+    cmds.rowLayout(numberOfColumns=6, adjustableColumn=2,
+                   columnWidth6=(98, 110, 50, 46, 40, 62),
+                   columnAlign6=("left", "left", "left",
+                                 "center", "center", "center"))
+
+    _build_swatches(entry["colors"])
+
+    field = cmds.textField(text=name,
+                           annotation="名前を変えて Enter でリネームできる")
+    cmds.textField(field, edit=True,
+                   changeCommand=lambda *a, n=name, f=field:
+                   _on_set_rename(n, f))
+    if not entry["applied"]:
+        # 控えは放っておくと溜まる一方なので、消す手段を右クリックに置く。
+        # 行のボタンを 1 つ増やすより幅を食わない
+        cmds.popupMenu(parent=field)
+        cmds.menuItem(label="控えから削除",
+                      c=lambda *a, n=name: _on_set_forget(n))
+
+    cmds.text(label="%d obj" % (entry["count"],), align="left",
+              fn="smallPlainLabelFont")
+
+    if entry["applied"]:
+        cmds.button(label="Hide" if entry["enabled"] else "Show", height=22,
+                    c=lambda *a, n=name: _on_set_toggle(n),
+                    ann="このセットだけ一時的に外す／掛け直す")
+        cmds.button(label="Sel", height=22,
+                    c=lambda *a, n=name: _on_set_select(n),
+                    ann="このセットのオブジェクトをシーンで選択する")
+        cmds.button(label="Restore", height=22,
+                    c=lambda *a, n=name: _on_set_restore(n),
+                    ann="元のマテリアルに戻してノードを片付ける\n"
+                        "（控えに残るので後から掛け直せる）")
+    else:
+        cmds.text(label="控え", align="center", fn="smallObliqueLabelFont",
+                  ann="シーンには掛かっていない。 控えにだけ残っている")
+        cmds.button(label="Sel", height=22,
+                    c=lambda *a, n=name: _on_set_select(n),
+                    ann="このセットのオブジェクトをシーンで選択する")
+        cmds.button(label="Apply", height=22,
+                    c=lambda *a, n=name: _on_set_reapply(n),
+                    ann="控えから同じ色分けを掛け直す")
+
+    cmds.setParent("..")
+
+
+def _refresh_list(*_args):
+    """一覧を作り直す。 **セット単位**で、色見本付きで並べる。"""
+    parent = _CTRL.get("rows")
+    if not parent or not cmds.columnLayout(parent, exists=True):
+        return
+
+    for child in cmds.columnLayout(parent, q=True, childArray=True) or []:
+        cmds.deleteUI(child)
+    cmds.setParent(parent)
+
+    entries = _all_sets()
+    for entry in entries:
+        _build_set_row(entry)
+    if not entries:
+        cmds.text(label="   まだ何も掛かっていません",
+                  align="left", fn="smallObliqueLabelFont")
+
+    applied = [entry for entry in entries if entry["applied"]]
+    showing = any(entry["enabled"] for entry in applied) if applied else True
+
+    if _CTRL.get("count"):
+        cmds.text(_CTRL["count"], edit=True,
+                  label="Sets: %d applied / %d backup%s"
+                        % (len(applied), len(entries) - len(applied),
+                           "" if showing else "   — 一時解除中"))
+
+    # トグルのラベルは**シーンの実態から**決める。 別にフラグを持つと、
+    # Maya 側で割り当てを手で変えられたときに表示と食い違う
+    if _CTRL.get("toggle"):
+        cmds.button(_CTRL["toggle"], edit=True, enable=bool(applied),
+                    label="Hide Colors" if showing else "Show Colors")
+
+
+# --------------------------------------------------------------------------- #
+# コールバック（上段）
+# --------------------------------------------------------------------------- #
+
+def _on_color_changed(*_args):
+    _set_color(_current_color())
+
+
+def _on_hex_changed(*_args):
+    """16 進欄の入力を色に反映する。 読めなければ元の表示に戻す。"""
+    text = cmds.textField(_CTRL["hex"], q=True, text=True)
+    try:
+        rgb = core.parse_hex(text)
+    except ValueError:
+        cmds.warning("[%s] %s は #RRGGBB の形で入れてください。"
+                     % (_PACKAGE, text))
+        cmds.textField(_CTRL["hex"], edit=True,
+                       text=core.to_hex(_current_color()))
+        return
+    _set_color(rgb)
+
+
+def _on_open_backup(*_args):
+    """控えの JSON がどこにあるかを示す（場所を確かめたいとき）。"""
+    path = _backup_path()
+    if not path:
+        cmds.warning("[%s] シーンが未保存なので控えの場所が決まりません。"
+                     % (_PACKAGE,))
+        return
+    print("[%s] backup: %s" % (_PACKAGE, path))
+    if not os.path.isfile(path):
+        cmds.warning("[%s] 控えはまだありません: %s" % (_PACKAGE, path))
+        return
+    try:
+        os.startfile(os.path.dirname(path))
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -670,7 +1037,7 @@ def _build_body():
     cmds.setParent("..")
 
     cmds.button(label="Apply to Selected", height=28, c=_on_apply_selected,
-                ann="選択したオブジェクトに上の色を掛ける")
+                ann="選択したオブジェクトに上の色を掛ける（1 セットになる）")
 
     cmds.rowLayout(numberOfColumns=2, adjustableColumn=1,
                    columnWidth2=(170, 170))
@@ -682,33 +1049,38 @@ def _build_body():
 
     cmds.separator(h=8, style="in")
 
-    _CTRL["count"] = cmds.text(label="Overridden: 0", align="left",
-                               fn="boldLabelFont")
+    _CTRL["count"] = cmds.text(label="Sets: 0 applied / 0 backup",
+                               align="left", fn="boldLabelFont")
 
     # 「一瞬だけ元のマテリアルを見る」ための往復。 Restore と違って
     # シェーダーは消さないので、何度でも掛け直せる
     _CTRL["toggle"] = cmds.button(
         label="Hide Colors", height=28, c=_on_toggle, enable=False,
-        ann="色を一時的に外して元のマテリアルを見る／掛け直す。\n"
-            "記録は残るので何度でも往復できる。\n"
+        ann="掛かっている色を一時的に全部外す／掛け直す。\n"
             "ホットキーに割り当てるなら: "
             "import color_override; color_override.toggle()")
 
-    _CTRL["list"] = cmds.textScrollList(
-        height=140, allowMultiSelection=True,
-        selectCommand=_on_select_in_scene,
-        annotation="行を選ぶとシーン側でも選択される")
+    # 一覧は行ごとに色見本（canvas）を並べるので textScrollList では作れない。
+    # scrollLayout の中に rowLayout を並べ、更新のたびに丸ごと作り直す
+    _CTRL["list"] = cmds.scrollLayout(height=170, childResizable=True,
+                                      horizontalScrollBarThickness=0)
+    _CTRL["rows"] = cmds.columnLayout(adjustableColumn=True, rowSpacing=2)
+    cmds.setParent("..")
+    cmds.setParent("..")
 
     cmds.rowLayout(numberOfColumns=3, adjustableColumn=1,
                    columnWidth3=(130, 110, 90))
     cmds.button(label="Restore Selected", height=26, c=_on_restore_selected,
-                ann="一覧で選んだ行（無ければシーンで選択中のもの）を"
-                    "元のマテリアルに戻す")
+                ann="シーンで選択中のオブジェクトを含むセットを片付ける")
     cmds.button(label="Restore All", height=26, c=_on_restore_all,
-                ann="シーン内のオーバーライドを全部戻す")
+                ann="掛かっているものを全部片付ける\n"
+                    "（控えに書き出すので後から掛け直せる）")
     cmds.button(label="Refresh", height=26, c=_refresh_list,
-                ann="一覧をシーンの実態から作り直す")
+                ann="一覧をシーンと控えの実態から作り直す")
     cmds.setParent("..")
+
+    cmds.button(label="控えの場所を開く", height=22, c=_on_open_backup,
+                ann="シーンの隣に置いている色分けの控え（JSON）")
 
 
 def show():
@@ -720,7 +1092,7 @@ def show():
 
     win = cmds.window(WINDOW,
                       title="Color Override  —  v%s" % (__version__,),
-                      widthHeight=(380, 430),
+                      widthHeight=(440, 510),
                       minimizeButton=True, maximizeButton=False, sizeable=True)
     cmds.columnLayout(adjustableColumn=True, rowSpacing=8,
                       columnAttach=("both", 10))

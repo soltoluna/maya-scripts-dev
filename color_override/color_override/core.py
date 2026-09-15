@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import colorsys
+import json
 import re
 
 
@@ -185,19 +186,6 @@ def unique(items):
             seen.add(item)
             out.append(item)
     return out
-
-
-def format_row(record):
-    """一覧に出す 1 行（`短い名前   #RRGGBB`。 一時解除中は `(off)` を付ける）。
-
-    >>> format_row({"target": "|grp|pSphere1", "color": (1.0, 0.0, 0.0)})
-    'pSphere1   #FF0000'
-    >>> format_row({"target": "a", "color": (1.0, 0.0, 0.0), "enabled": False})
-    'a   #FF0000   (off)'
-    """
-    row = "%s   %s" % (short_name(record.get("target")),
-                       to_hex(record.get("color") or (0.0, 0.0, 0.0)))
-    return row if record.get("enabled", True) else row + "   (off)"
 
 
 def match_records(records, selection):
@@ -379,3 +367,271 @@ def index_by_object(records):
             index.setdefault(name, record)
             index.setdefault(short_name(name), record)
     return index
+
+
+# --------------------------------------------------------------------------- #
+# セット — 名前を付けた色分けのまとまり
+# --------------------------------------------------------------------------- #
+#
+# まとめて色を掛けると対象が数十〜数百になる。 一覧を 1 オブジェクト 1 行で
+# 出すと使い物にならないので、**1 回の Apply = 1 セット**として畳み、名前を
+# 付けて扱う。
+#
+# セットはシーンの隣に置く JSON にも書き出せる。 `Restore` はシーンから
+# ノードを消す（＝シーンをきれいに保つ）ので、消す前に控えておかないと
+# 同じ色分けに二度と戻れない。
+
+CATALOG_FORMAT = 1                 # JSON の形式版。 読めない新形式を弾くため
+DEFAULT_SET_PREFIX = "Set"
+UNNAMED_SET = "Unnamed"            # セット名を持たない記録（v0.3.0 以前）の行き先
+_MAX_SET_NAME = 64
+
+_NUMBERED_SET = re.compile(r"^(?P<prefix>.+?)\s+(?P<number>\d+)$")
+
+
+def normalize_set_name(name, fallback=UNNAMED_SET):
+    """セット名を整える（前後の空白を落とし、長すぎたら切る）。
+
+    >>> normalize_set_name("  hair check  ")
+    'hair check'
+    >>> normalize_set_name("")
+    'Unnamed'
+    >>> normalize_set_name(None, fallback="Set 1")
+    'Set 1'
+    """
+    text = " ".join((name or "").split())
+    return text[:_MAX_SET_NAME] if text else fallback
+
+
+def new_set_name(existing, prefix=DEFAULT_SET_PREFIX):
+    """既存と衝突しない `Set 1` 形式の名前。
+
+    **空き番号は埋めずに最大 + 1 にする。** 埋めると、直前に片付けたセットの
+    名前が戻ってきて「さっきと同じ名前の別物」ができる。
+
+    >>> new_set_name([])
+    'Set 1'
+    >>> new_set_name(["Set 1", "Set 2"])
+    'Set 3'
+    >>> new_set_name(["Set 1", "Set 3"])
+    'Set 4'
+    >>> new_set_name(["hair", "Set 2"])
+    'Set 3'
+    """
+    highest = 0
+    for name in existing or []:
+        found = _NUMBERED_SET.match(normalize_set_name(name, ""))
+        if found and found.group("prefix") == prefix:
+            highest = max(highest, int(found.group("number")))
+    return "%s %d" % (prefix, highest + 1)
+
+
+def set_items_from_records(records):
+    """記録から、控えに書く `{target, color}` の一覧を作る。
+
+    **戻し先（元の shadingEngine）は書かない。** 呼び戻すのは別のセッション・
+    別のシーン状態かもしれないので、そのときの割り当てを見て取り直す。
+    古い戻し先を持ち回ると、もう存在しない SG へ戻そうとして事故る。
+
+    >>> set_items_from_records([{"target": "|a", "color": (1.0, 0.0, 0.0)}])
+    [{'target': '|a', 'color': (1.0, 0.0, 0.0)}]
+    """
+    items = []
+    for record in records or []:
+        target = record.get("target")
+        if not target:
+            continue
+        items.append({"target": target,
+                      "color": tuple(record.get("color") or (0.0, 0.0, 0.0))})
+    return items
+
+
+def group_by_set(records):
+    """記録をセット名でまとめ、一覧にそのまま流せる形で返す。
+
+    セット名を持たない記録（v0.3.0 以前に掛けたもの）は `Unnamed` に入る。
+
+    >>> sets = group_by_set([
+    ...     {"set": "hair", "color": (1.0, 0.0, 0.0), "members": ["a"],
+    ...      "enabled": True},
+    ...     {"set": "hair", "color": (0.0, 1.0, 0.0), "members": ["b", "c"],
+    ...      "enabled": True}])
+    >>> sets[0]["name"], sets[0]["count"], sets[0]["applied"]
+    ('hair', 3, True)
+    """
+    order = []
+    groups = {}
+    for record in records or []:
+        name = normalize_set_name(record.get("set"), UNNAMED_SET)
+        if name not in groups:
+            groups[name] = []
+            order.append(name)
+        groups[name].append(record)
+
+    sets = []
+    for name in order:
+        group = groups[name]
+        sets.append({
+            "name": name,
+            "applied": True,
+            "enabled": any_enabled(group),
+            "records": group,
+            "items": set_items_from_records(group),
+            "colors": [tuple(rec.get("color") or (0.0, 0.0, 0.0))
+                       for rec in group],
+            "count": sum(len(rec.get("members") or []) for rec in group),
+        })
+    return sets
+
+
+def swatch_colors(colors, limit=8):
+    """一覧に出す色見本と、入り切らなかった数 `(色, あふれた数)`。
+
+    **同じ色は 1 つに畳む。** 12 個のオブジェクトに 1 色を掛けたセットは
+    見本 1 個で足りる。 ばらばらに振ったセットだけが複数個になる。
+
+    >>> swatch_colors([(1.0, 0.0, 0.0)] * 12)
+    ([(1.0, 0.0, 0.0)], 0)
+    >>> shown, overflow = swatch_colors(
+    ...     [(c / 10.0, 0.0, 0.0) for c in range(10)], limit=3)
+    >>> len(shown), overflow
+    (3, 7)
+    >>> swatch_colors([])
+    ([], 0)
+    """
+    if limit < 1:
+        raise ValueError("limit must be >= 1: %r" % (limit,))
+    distinct = unique([tuple(c) for c in colors or []])
+    if len(distinct) <= limit:
+        return (distinct, 0)
+    return (distinct[:limit], len(distinct) - limit)
+
+
+def backup_path_for(scene_path, suffix=".color_override.json"):
+    """シーンファイルの隣に置く控えのパス。
+
+    シーンと同じ場所・同じ名前にするので、**どのシーンの控えかが一目で分かり、
+    要らなくなったら消せる**。 シーンが未保存なら置き場所が決まらないので None。
+
+    >>> backup_path_for("C:/work/shot010.ma")
+    'C:/work/shot010.color_override.json'
+    >>> backup_path_for("C:\\\\work\\\\shot010.mb")
+    'C:/work/shot010.color_override.json'
+    >>> backup_path_for("") is None
+    True
+    """
+    path = (scene_path or "").strip().replace("\\", "/")
+    if not path:
+        return None
+    head, _, tail = path.rpartition("/")
+    stem = tail.rsplit(".", 1)[0] if "." in tail else tail
+    if not stem:
+        return None
+    return (head + "/" + stem + suffix) if head else (stem + suffix)
+
+
+def catalog_to_text(sets, scene="", tool_version=""):
+    """セットの一覧を、シーンの隣に置く JSON にする。
+
+    人が開いて読める形（インデント付き・日本語そのまま）にしてある。
+    壊れたときに手で直せるほうが、こちらが読めないより良い。
+    """
+    payload = {
+        "format": CATALOG_FORMAT,
+        "tool": "color_override",
+        "tool_version": tool_version,
+        "scene": scene,
+        "sets": [
+            {"name": normalize_set_name(entry.get("name")),
+             "items": [{"target": item["target"],
+                        "color": [round(float(c), 6) for c in item["color"]]}
+                       for item in entry.get("items") or []]}
+            for entry in sets or []],
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def catalog_from_text(text):
+    """`catalog_to_text` の逆。 読めない項目は捨てる。
+
+    **人が手で編集しうるファイルなので、全面的に疑って読む。** 1 項目が
+    壊れていても残りは使えるようにする。 ファイルごと駄目なときだけ
+    `ValueError`。
+
+    >>> catalog_from_text(catalog_to_text(
+    ...     [{"name": "hair", "items": [{"target": "|a", "color": (1, 0, 0)}]}]))
+    [{'name': 'hair', 'items': [{'target': '|a', 'color': (1.0, 0.0, 0.0)}]}]
+    >>> catalog_from_text("[]")
+    Traceback (most recent call last):
+        ...
+    ValueError: 色分けの控えとして読めない（辞書ではない）
+    """
+    try:
+        payload = json.loads(text or "")
+    except Exception as exc:
+        raise ValueError("JSON として読めない: %s" % (exc,))
+    if not isinstance(payload, dict):
+        raise ValueError("色分けの控えとして読めない（辞書ではない）")
+
+    tool = payload.get("tool")
+    if tool not in (None, "color_override"):
+        raise ValueError("別のツールのファイル: %r" % (tool,))
+
+    fmt = payload.get("format", CATALOG_FORMAT)
+    if not isinstance(fmt, int) or fmt > CATALOG_FORMAT:
+        raise ValueError("読めない形式 (format=%r)。 ツールを更新してください"
+                         % (fmt,))
+
+    sets = []
+    for raw in payload.get("sets") or []:
+        if not isinstance(raw, dict):
+            continue
+        items = []
+        for item in raw.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            target = item.get("target")
+            color = item.get("color")
+            if not target or not isinstance(color, (list, tuple)):
+                continue
+            if len(color) != 3:
+                continue
+            try:
+                items.append({"target": str(target),
+                              "color": tuple(clamp01(c) for c in color)})
+            except (TypeError, ValueError):
+                continue
+        if items:
+            sets.append({"name": normalize_set_name(raw.get("name")),
+                         "items": items})
+    return sets
+
+
+def merge_catalog(existing, incoming):
+    """控えに新しいセットを取り込む（同名は**後から来たほうで置き換える**）。
+
+    順序は「元からあったもの → 新しく増えたもの」。 片付けるたびに追記され、
+    同じ名前で掛け直せば上書きされる。
+
+    >>> [s["name"] for s in merge_catalog(
+    ...     [{"name": "a", "items": [1]}, {"name": "b", "items": [2]}],
+    ...     [{"name": "b", "items": [3]}, {"name": "c", "items": [4]}])]
+    ['a', 'b', 'c']
+    >>> merge_catalog([{"name": "b", "items": [2]}],
+    ...               [{"name": "b", "items": [3]}])[0]["items"]
+    [3]
+    """
+    merged = []
+    replacement = {normalize_set_name(entry.get("name")): entry
+                   for entry in incoming or []}
+    seen = set()
+    for entry in existing or []:
+        name = normalize_set_name(entry.get("name"))
+        merged.append(replacement.get(name, entry))
+        seen.add(name)
+    for entry in incoming or []:
+        name = normalize_set_name(entry.get("name"))
+        if name not in seen:
+            merged.append(entry)
+            seen.add(name)
+    return merged

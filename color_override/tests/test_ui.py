@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 
 import _bootstrap
@@ -210,6 +211,105 @@ class WindowCase(unittest.TestCase):
                      self.ui._ATTR_MEMBERS):
             with self.subTest(attr=attr):
                 self.assertTrue(attr.startswith(self.module.NAMESPACE))
+
+
+class BackupCase(unittest.TestCase):
+    """控え（シーンの隣の JSON）の読み書き。
+
+    **`Restore` はシーンからノードを消す。** 控えが書けていないと同じ色分けに
+    二度と戻れないので、ここが黙って失敗しないことが要になる。
+    """
+
+    def setUp(self):
+        import tempfile
+        _bootstrap.reset_registry()
+        self.module = _bootstrap.reload_tool()
+        self.ui = self.module.ui
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "shot.color_override.json")
+        self.sets = [{"name": "hair",
+                      "items": [{"target": "|a", "color": (1.0, 0.0, 0.0)}]}]
+
+    def test_round_trip_through_a_real_file(self):
+        self.ui._write_backup(self.sets, self.path)
+        self.assertEqual(self.ui._read_backup(self.path), self.sets)
+
+    def test_reading_a_missing_file_is_empty(self):
+        self.assertEqual(self.ui._read_backup(self.path), [])
+
+    def test_a_broken_file_warns_instead_of_raising(self):
+        """手で編集して壊れていても、ツールが開けなくならないこと。"""
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write("{ this is not json")
+        self.assertEqual(self.ui._read_backup(self.path), [])
+        self.assertTrue(_bootstrap.MESSAGES, "警告が出ていない")
+
+    def test_no_scene_means_no_backup_path(self):
+        """未保存のシーンでは置き場所が決まらない。"""
+        self.assertIsNone(self.ui._backup_path())
+
+    def test_nothing_to_back_up_is_not_an_abort(self):
+        """`None`（控えなかった）と `False`（中止）を取り違えないこと。"""
+        self.assertIsNone(self.ui._backup_sets([]))
+        self.assertIsNone(self.ui._backup_sets([{"name": "x", "items": []}]))
+
+
+class SetRowCase(unittest.TestCase):
+    """一覧の行。 **セット単位**で、色はコードでなく見本で出す。"""
+
+    def setUp(self):
+        _bootstrap.reset_registry()
+        self.module = _bootstrap.reload_tool()
+        self.ui = self.module.ui
+
+    def _canvas_colors(self):
+        return [kwargs.get("rgbValue") for name, _a, kwargs
+                in _bootstrap.CALLS if name == "canvas"]
+
+    def test_a_row_draws_a_swatch_per_distinct_colour(self):
+        self.ui._build_swatches([(1.0, 0.0, 0.0), (1.0, 0.0, 0.0),
+                                 (0.0, 1.0, 0.0)])
+        self.assertEqual(self._canvas_colors(),
+                         [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0)])
+
+    def test_the_hex_code_stays_in_the_tooltip(self):
+        """見本で分かるようにしたが、値そのものも読めるようにしておく。"""
+        self.ui._build_swatches([(1.0, 0.0, 0.0)])
+        tooltips = [kwargs.get("annotation") for name, _a, kwargs
+                    in _bootstrap.CALLS if name == "canvas"]
+        self.assertEqual(tooltips, ["#FF0000"])
+
+    def test_no_colour_still_builds_a_row(self):
+        self.ui._build_swatches([])          # 例外が出なければよい
+        self.assertEqual(self._canvas_colors(), [])
+
+    def test_an_applied_row_offers_hide_and_restore(self):
+        self.ui._build_set_row({"name": "hair", "applied": True,
+                                "enabled": True, "records": [], "items": [],
+                                "colors": [(1.0, 0.0, 0.0)], "count": 3})
+        labels = [kwargs.get("label") for name, _a, kwargs
+                  in _bootstrap.CALLS if name == "button"]
+        self.assertEqual(labels, ["Hide", "Sel", "Restore"])
+
+    def test_a_backup_row_offers_apply(self):
+        """Restore All したあとも呼び戻せる、が成立していること。"""
+        self.ui._build_set_row({"name": "hair", "applied": False,
+                                "enabled": False, "records": [],
+                                "items": [{"target": "|a",
+                                           "color": (1.0, 0.0, 0.0)}],
+                                "colors": [(1.0, 0.0, 0.0)], "count": 1})
+        labels = [kwargs.get("label") for name, _a, kwargs
+                  in _bootstrap.CALLS if name == "button"]
+        self.assertEqual(labels, ["Sel", "Apply"])
+
+    def test_a_disabled_row_offers_show(self):
+        self.ui._build_set_row({"name": "hair", "applied": True,
+                                "enabled": False, "records": [], "items": [],
+                                "colors": [(1.0, 0.0, 0.0)], "count": 1})
+        labels = [kwargs.get("label") for name, _a, kwargs
+                  in _bootstrap.CALLS if name == "button"]
+        self.assertIn("Show", labels)
 
 
 if __name__ == "__main__":
