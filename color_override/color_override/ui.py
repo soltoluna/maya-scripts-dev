@@ -154,28 +154,50 @@ def _listed(value):
 
 
 def _component_list(plug, shape):
-    """`objectGroups[n]` プラグが抱えるフェースの塊をフルパスで返す。
+    """`objectGroups[n]` が抱えるフェースの塊を `(塊, 読めたか)` で返す。
 
     `objectGrpCompList` は `['f[0:2]', 'f[7]']` のような形で返る。 SG の
     メンバー（`cmds.sets(sg, q=True)`）を舐めるより安く、しかも
     **どの SG のどのフェースか**が接続から直接たどれる。
 
-    **`f[...]` の形をしていないものは捨てる。** ここで拾い損ねると
-    「読めなかった」扱いになって色が掛からないだけだが、変な名前を混ぜると
-    戻すときの `cmds.sets` が落ちる。 掛からないほうがまだよい。
+    **空（`[]` / `None`）は「読めなかった」ではない。** `objectGroups` は
+    フェース割り当て専用ではなく、**オブジェクト全体のメンバーシップでも
+    経由する**。 その場合コンポーネントは 1 つも入っていない。 v0.5.0 は
+    これを読み取り失敗と見なしたため、ふつうのシェイプにまで
+    「掛けない」判断が働き、**色がまったく掛からなくなった**（v0.7.1 で修正）。
+
+    「読めなかった」は次の 2 つだけ:
+
+      * `getAttr` そのものが失敗した
+      * 中身があるのに `f[...]` の形が 1 つも取れなかった
+        （変な名前を混ぜると戻すときの `cmds.sets` が落ちるので拾わない）
     """
     try:
         value = cmds.getAttr(plug + ".objectGrpCompList")
     except Exception:
-        return []
+        return ([], False)
 
     items = []
     for item in _listed(value):
         # 実機の戻りが入れ子だった場合に備えて 1 段だけほどく
         items.extend(_listed(item) if isinstance(item, (list, tuple))
                      else [item])
-    return ["%s.%s" % (shape, item) for item in items
-            if isinstance(item, str) and "[" in item]
+    if not items:
+        return ([], True)      # 空 = オブジェクト全体のメンバー
+
+    components = ["%s.%s" % (shape, item) for item in items
+                  if isinstance(item, str) and "[" in item]
+    return (components, bool(components))
+
+
+def _simple_engine_of(shape):
+    """シェイプにつながっている shadingEngine（最初の 1 つ）。
+
+    **v0.4.0 までの読み方。** 新しい読み方が通らない環境でも、せめて
+    シェイプ単位では戻せるようにするための逃げ道として残してある。
+    """
+    found = _listed(cmds.listConnections(shape, type="shadingEngine"))
+    return found[0] if found else _DEFAULT_SG
 
 
 def _read_assignment(shape):
@@ -186,12 +208,27 @@ def _read_assignment(shape):
     セットの中身を引かずに済む（大きいシーンの `initialShadingGroup` を
     舐めない）。
 
-    「読めたか」が False なのは、フェース単位で割り当たっているのに塊を
+    「読めたか」が False なのは、フェースの塊が入っているはずなのに
     読み出せなかったとき。 **この場合は色を掛けない。** 掛けてしまうと
     `forceElement` が元の分割を落とし、戻す手掛かりがどこにも残らない。
+
+    **ただし読み方そのものが通らないときは、掛かるほうを優先して
+    v0.4.0 の読み方に落とす。** 色を塗るのがこのツールの主目的で、
+    それが丸ごと動かなくなるほうが害が大きい（v0.7.1）。
     """
-    pairs = _listed(cmds.listConnections(shape, type="shadingEngine",
-                                         connections=True, plugs=True))
+    try:
+        pairs = _listed(cmds.listConnections(shape, type="shadingEngine",
+                                             connections=True, plugs=True))
+    except Exception as exc:
+        cmds.warning("[%s] 割り当てを詳しく読めないので簡易読み取りに落とします"
+                     "（%s）: %s" % (_PACKAGE, core.short_name(shape), exc))
+        return (_simple_engine_of(shape), [], True)
+
+    if not pairs:
+        # つながっていないか、ペアで返ってこない環境。 どちらでも
+        # 「掛からない」にはしない
+        return (_simple_engine_of(shape), [], True)
+
     wholes = []
     entries = []
     unreadable = False
@@ -211,9 +248,13 @@ def _read_assignment(shape):
         if _FACE_PLUG not in (local or ""):
             wholes.append(engine)
             continue
-        components = _component_list(local, shape)
+        components, readable = _component_list(local, shape)
         if components:
             entries.append({"sg": engine, "components": components})
+        elif readable:
+            # コンポーネントを持たない objectGroups = オブジェクト全体の
+            # メンバーシップ。 フェース割り当てではない
+            wholes.append(engine)
         else:
             unreadable = True
 
@@ -829,9 +870,15 @@ def _apply_pairs(pairs, label, set_name=None):
 
     _in_undo_chunk(label, _run)
     _refresh_list()
+    note = ""
+    if skipped:
+        # 名前まで出す。 件数だけだと、どれが掛からなかったのかを
+        # 探すところから始めることになる
+        shown = ", ".join(core.short_name(node) for node in skipped[:3])
+        note = "  skipped: %d (%s%s)" % (len(skipped), shown,
+                                         " ..." if len(skipped) > 3 else "")
     print("[%s] %s: %d object(s) -> %s%s"
-          % (_PACKAGE, label, len(pairs) - len(skipped), name,
-             ("  skipped: %d" % (len(skipped),)) if skipped else ""))
+          % (_PACKAGE, label, len(pairs) - len(skipped), name, note))
     return name
 
 

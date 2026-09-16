@@ -341,10 +341,23 @@ class FaceAssignmentCase(unittest.TestCase):
         setattr(self.cmds, name, func)
         self.addCleanup(lambda: delattr(self.cmds, name))
 
-    def _scene(self, connections, components=None, exists=True):
-        """割り当てを差し替える。 `connections` は `[(局所プラグ, SG プラグ)]`。"""
+    def _scene(self, connections, components=None, exists=True,
+               paired_fails=False, simple=None):
+        """割り当てを差し替える。 `connections` は `[(局所プラグ, SG プラグ)]`。
+
+        `paired_fails` で「詳しい読み方（connections=True）だけ通らない」
+        環境を再現する（簡易読み取りへの逃げ道が効くかを見るため）。
+        """
         flat = [part for pair in connections for part in pair]
-        self._patch("listConnections", lambda *a, **k: list(flat))
+
+        def _list_connections(*_a, **kwargs):
+            if kwargs.get("connections"):
+                if paired_fails:
+                    raise RuntimeError("flag not supported")
+                return list(flat)
+            return list(simple or [])
+
+        self._patch("listConnections", _list_connections)
         table = components or {}
 
         def _get_attr(plug, *_a, **_k):
@@ -403,6 +416,39 @@ class FaceAssignmentCase(unittest.TestCase):
             self.ui._read_assignment(self.SHAPE)[1],
             [{"sg": "sgA", "components": ["|a|aShape.f[0:2]",
                                           "|a|aShape.f[7]"]}])
+
+    def test_an_object_group_without_components_is_a_whole_assignment(self):
+        """**`objectGroups` はフェース専用ではない。**
+
+        オブジェクト全体のメンバーシップでも経由し、そのときコンポーネントは
+        空になる。 v0.5.0 はこれを読み取り失敗と見なし、ふつうのシェイプにまで
+        「掛けない」判断が働いて**色がまったく掛からなくなった**。
+        """
+        self._scene(
+            [("aShape.instObjGroups[0].objectGroups[0]", "sgA.dagSetMembers[0]")],
+            {"aShape.instObjGroups[0].objectGroups[0]": []})
+        self.assertEqual(self.ui._read_assignment(self.SHAPE),
+                         ("sgA", [], True))
+
+    def test_such_a_shape_still_gets_a_colour(self):
+        """上の判定が効いていることを、掛ける側からも押さえる。"""
+        self._scene(
+            [("aShape.instObjGroups[0].objectGroups[0]", "sgA.dagSetMembers[0]")],
+            {"aShape.instObjGroups[0].objectGroups[0]": []})
+        self.assertIsNotNone(self._apply(), "ふつうのシェイプに色が掛からない")
+
+    def test_a_reader_that_cannot_run_falls_back_instead_of_refusing(self):
+        """**色が塗れないほうが害が大きい。** 読めないなら簡易読み取りに落とす。"""
+        self._scene([], paired_fails=True, simple=["lambert2SG"])
+        self.assertEqual(self.ui._read_assignment(self.SHAPE),
+                         ("lambert2SG", [], True))
+        self.assertIsNotNone(self._apply())
+
+    def test_an_empty_pair_list_falls_back_too(self):
+        """ペアで返ってこない環境でも「掛からない」にはしない。"""
+        self._scene([], simple=["lambert2SG"])
+        self.assertEqual(self.ui._read_assignment(self.SHAPE),
+                         ("lambert2SG", [], True))
 
     def test_an_unreadable_face_group_is_reported_as_not_readable(self):
         """塊が読めないなら「読めた」と言わない（掛けない判断の根拠になる）。"""
