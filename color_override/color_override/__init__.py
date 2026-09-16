@@ -42,7 +42,7 @@
 from __future__ import annotations
 
 # 先に定義する（サブモジュールが `from . import __version__` で参照するため）
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 
 # シェルフボタンに出す短い名前（10 文字以内）。 ハブ `install.py` がここを読んで
 # ボタンを貼る。 **表示名であってツール名ではない**ので接頭辞は付けない
@@ -65,8 +65,9 @@ from . import core      # noqa: E402  Maya 非依存の純ロジック
 from . import dev_tools  # noqa: E402  バージョン表示 / GitHub から更新
 from . import ui        # noqa: E402  cmds による UI
 
-__all__ = ["show", "toggle", "diagnose", "core", "ui", "dev_tools",
-           "__version__", "NAMESPACE", "SHELF_LABEL"]
+__all__ = ["show", "toggle", "diagnose", "probe_render_setup",
+           "core", "ui", "dev_tools", "__version__", "NAMESPACE",
+           "SHELF_LABEL"]
 
 
 def show():
@@ -84,6 +85,20 @@ def diagnose():
         color_override.diagnose()
     """
     return ui.diagnose()
+
+
+def probe_render_setup(try_it=False, cleanup=False):
+    """レンダーセットアップで色を付けられるかを実機で確かめる（下調べ）。
+
+    マテリアルを差し替える方式はフェース割り当てを壊す。 レンダーセットアップの
+    マテリアルオーバーライドなら割り当てを触らないので原理的に解決するが、
+    API を開発機で確かめられないので、呼び方を実機から持ち帰る。
+
+        color_override.probe_render_setup()              # 調べるだけ（安全）
+        color_override.probe_render_setup(try_it=True)   # 実際に掛けてみる
+        color_override.probe_render_setup(cleanup=True)  # 試した分を片付ける
+    """
+    return ui.probe_render_setup(try_it=try_it, cleanup=cleanup)
 
 
 def toggle():

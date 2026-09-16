@@ -811,5 +811,49 @@ class SceneWatchCase(unittest.TestCase):
         self.assertEqual(set(parents), {self.ui.WINDOW})
 
 
+class RenderSetupProbeCase(unittest.TestCase):
+    """レンダーセットアップの下調べ（v1.0.0 の判断材料を実機から持ち帰る）。
+
+    **開発機には `maya.app.renderSetup` そのものが無い。** ここで押さえられるのは
+    「無い環境で落ちないこと」だけで、API の呼び方は実機の出力を見るしかない。
+    """
+
+    def setUp(self):
+        _bootstrap.reset_registry()
+        self.module = _bootstrap.reload_tool()
+        self.ui = self.module.ui
+
+    def test_it_is_exposed_on_the_package(self):
+        self.assertTrue(
+            callable(getattr(self.module, "probe_render_setup", None)))
+        self.assertIn("probe_render_setup", self.module.__all__)
+
+    def test_it_does_not_raise_without_render_setup(self):
+        """import できない環境でも、そのことを出して終わること。"""
+        self.module.probe_render_setup()
+
+    def test_looking_only_does_not_touch_the_scene(self):
+        """**既定はシーンを一切変更しない。** 調べるだけのつもりで壊さない。"""
+        self.module.probe_render_setup()
+        touched = [name for name, _a, _k in _bootstrap.CALLS
+                   if name in ("shadingNode", "setAttr", "connectAttr",
+                               "delete", "createRenderLayer")]
+        self.assertEqual(touched, [])
+
+    def test_trying_without_a_selection_is_a_no_op(self):
+        _bootstrap.set_selection([])
+        self.module.probe_render_setup(try_it=True)
+
+    def test_cleanup_does_not_raise(self):
+        self.module.probe_render_setup(cleanup=True)
+
+    def test_probe_nodes_carry_the_namespace(self):
+        """調査で作るものも他人のノードとぶつからない札を付ける。"""
+        self.assertTrue(self.ui._PROBE_SUFFIX)
+        self.assertTrue(
+            (self.ui._NS + self.ui._PROBE_SUFFIX).startswith(
+                self.module.NAMESPACE + "_"))
+
+
 if __name__ == "__main__":
     unittest.main()

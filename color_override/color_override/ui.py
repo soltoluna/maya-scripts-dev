@@ -1426,6 +1426,241 @@ def diagnose():
 
 
 # --------------------------------------------------------------------------- #
+# レンダーセットアップを試す（v1.0.0 の下調べ）
+# --------------------------------------------------------------------------- #
+#
+# **マテリアルを差し替える方式はフェース割り当てを壊す。** レンダーセットアップの
+# マテリアルオーバーライドなら割り当てそのものを触らないので、原理的にこの問題が
+# 消える（レイヤーを外せば元の状態がそのまま戻る）。
+#
+# ただし API は `cmds` ではなく `maya.app.renderSetup.model.*` で、**正確な
+# 呼び方を手元で確かめられない**（開発機に Maya が無い）。 想像で書くと
+# また往復になるので、**実機から呼び方そのものを持ち帰る**ためのものがこれ。
+
+_RENDER_SETUP_MODULES = (
+    "maya.app.renderSetup.model.renderSetup",
+    "maya.app.renderSetup.model.typeIDs",
+    "maya.app.renderSetup.model.collection",
+    "maya.app.renderSetup.model.selector",
+    "maya.app.renderSetup.model.override",
+    "maya.app.renderSetup.model.renderLayer",
+)
+
+# 調査で作るものの名前。 本番のノードと混ざらないよう別の札を付ける
+_PROBE_SUFFIX = "_probe"
+
+
+def _import(name):
+    """import して返す。 失敗したら理由を値として返す。"""
+    import importlib
+    try:
+        return importlib.import_module(name)
+    except Exception as exc:
+        return "<IMPORT FAILED %s: %s>" % (type(exc).__name__, exc)
+
+
+def _public_names(obj, keep=None):
+    """公開メソッド / 属性の一覧（`keep` を含むものだけに絞れる）。"""
+    try:
+        names = [name for name in dir(obj) if not name.startswith("_")]
+    except Exception as exc:
+        return "<dir FAILED: %s>" % (exc,)
+    if keep:
+        names = [name for name in names
+                 if any(word.lower() in name.lower() for word in keep)]
+    return sorted(names)
+
+
+def _probe_report():
+    """レンダーセットアップの API を洗い出して出す（シーンは触らない）。"""
+    print("-" * 60)
+    print("  render setup modules")
+    loaded = {}
+    for name in _RENDER_SETUP_MODULES:
+        module = _import(name)
+        loaded[name.rsplit(".", 1)[-1]] = module
+        print("    %-12s : %s"
+              % (name.rsplit(".", 1)[-1],
+                 module if isinstance(module, str) else "ok"))
+
+    type_ids = loaded.get("typeIDs")
+    if not isinstance(type_ids, str):
+        print("    typeIDs (material/override):")
+        print("      %r" % (_public_names(type_ids, ["material", "shader"]),))
+
+    render_setup = loaded.get("renderSetup")
+    if not isinstance(render_setup, str):
+        instance = _safe(render_setup.instance)
+        print("    instance()   : %r" % (instance,))
+        print("      methods    : %r"
+              % (_public_names(instance,
+                               ["layer", "switch", "visible", "clear"]),))
+
+    for key, keep in (("collection", ["override", "selector", "member"]),
+                      ("selector", ["selection", "pattern", "filter", "type"]),
+                      ("override", ["shader", "material", "attr", "value",
+                                    "name", "apply"]),
+                      ("renderLayer", ["collection", "visible", "member"])):
+        module = loaded.get(key)
+        if isinstance(module, str):
+            continue
+        print("    %s classes:" % (key,))
+        for cls_name in _public_names(module):
+            cls = getattr(module, cls_name, None)
+            if not isinstance(cls, type):
+                continue
+            names = _public_names(cls, keep)
+            if names:
+                print("      %-22s %r" % (cls_name, names))
+
+
+def _probe_try(rgb=(1.0, 0.0, 0.0)):
+    """実際に調査用レイヤーを作って、選択物に色を掛けてみる。
+
+    **呼び方が分からないので、ありそうな順に試して「どれが通ったか」を出す。**
+    通った呼び方がそのまま v1.0.0 の実装になる。
+    """
+    nodes = _selected_objects()
+    if not nodes:
+        print("  try_it: 選択が空です（掛けたいオブジェクトを選んでから）")
+        return
+
+    render_setup = _import(_RENDER_SETUP_MODULES[0])
+    type_ids = _import(_RENDER_SETUP_MODULES[1])
+    if isinstance(render_setup, str) or isinstance(type_ids, str):
+        print("  try_it: レンダーセットアップを import できないので中止")
+        return
+
+    name = _NS + _PROBE_SUFFIX
+    print("-" * 60)
+    print("  try_it: %d node(s) -> layer %r" % (len(nodes), name))
+
+    instance = _safe(render_setup.instance)
+    layer = _safe(instance.createRenderLayer, name)
+    print("    createRenderLayer  : %r" % (layer,))
+    if isinstance(layer, str):
+        return
+
+    collection = _safe(layer.createCollection, name + "_col")
+    print("    createCollection   : %r" % (collection,))
+    if isinstance(collection, str):
+        return
+    print("      collection methods: %r" % (_public_names(collection),))
+
+    selector = _safe(collection.getSelector)
+    print("    getSelector        : %r" % (selector,))
+    print("      selector methods : %r" % (_public_names(selector),))
+
+    # セレクタに対象を渡す — ありそうな順に試す
+    for label, call in (
+            ("setPattern",
+             lambda: selector.setPattern(", ".join(nodes))),
+            ("staticSelection.set",
+             lambda: selector.staticSelection.set(list(nodes))),
+            ("setStaticSelection",
+             lambda: selector.setStaticSelection(list(nodes)))):
+        result = _safe(call)
+        print("      %-20s -> %r" % (label, result))
+        if not isinstance(result, str):
+            break
+
+    # 掛けるシェーダーは今までどおり surfaceShader（陰影が乗らない）
+    shader = cmds.shadingNode("surfaceShader", asShader=True,
+                              name=name + "_SHD")
+    cmds.setAttr(shader + ".outColor", rgb[0], rgb[1], rgb[2], type="double3")
+    engine = cmds.sets(name=name + "_SG", renderable=True,
+                       noSurfaceShader=True, empty=True)
+    cmds.connectAttr(shader + ".outColor", engine + ".surfaceShader",
+                     force=True)
+    print("    shader / SG        : %r / %r" % (shader, engine))
+
+    material_id = getattr(type_ids, "materialOverride", None)
+    print("    typeIDs.materialOverride: %r" % (material_id,))
+    override = _safe(collection.createOverride, name + "_mat", material_id)
+    print("    createOverride     : %r" % (override,))
+    if isinstance(override, str):
+        return
+    print("      override methods : %r" % (_public_names(override),))
+
+    # オーバーライドにシェーダーを渡す — ここも総当たり
+    for label, call in (
+            ("setShader", lambda: override.setShader(shader)),
+            ("setMaterial", lambda: override.setMaterial(engine)),
+            ("setSource", lambda: override.setSource(shader + ".outColor")),
+            ("connectAttr(attrValue)",
+             lambda: cmds.connectAttr(shader + ".outColor",
+                                      override.name() + ".attrValue",
+                                      force=True))):
+        result = _safe(call)
+        print("      %-24s -> %r" % (label, result))
+        if not isinstance(result, str):
+            break
+
+    print("    switchToLayer      : %r" % (_safe(instance.switchToLayer, layer),))
+    print("")
+    print("  ビューポートに色が出ていれば、この方式で作り直せます。")
+    print("  片付け: color_override.probe_render_setup(cleanup=True)")
+
+
+def _probe_cleanup():
+    """調査で作ったものを消す。"""
+    name = _NS + _PROBE_SUFFIX
+    render_setup = _import(_RENDER_SETUP_MODULES[0])
+    if not isinstance(render_setup, str):
+        instance = _safe(render_setup.instance)
+        print("  switchToLayer(master): %r"
+              % (_safe(getattr(instance, "switchToLayer", None),
+                       _safe(getattr(instance, "getDefaultRenderLayer", None))),))
+        for layer in (_safe(instance.getRenderLayers) or []):
+            if isinstance(layer, str):
+                break
+            if _safe(layer.name) == name:
+                print("  detachAndDelete      : %r"
+                      % (_safe(getattr(layer, "detachAndDelete", None)),))
+
+    for node in (name + "_SHD", name + "_SG"):
+        if cmds.objExists(node):
+            cmds.delete(node)
+            print("  deleted              : %s" % (node,))
+
+
+def probe_render_setup(try_it=False, cleanup=False):
+    """**レンダーセットアップで色を付けられるかを実機で確かめる。**
+
+    マテリアルを差し替える方式はフェース割り当てを壊す。 レンダーセットアップの
+    マテリアルオーバーライドなら割り当てを触らないので、原理的にその問題が
+    消える。 ただし API を手元で確かめられないので、**呼び方そのものを実機から
+    持ち帰る**ためのもの。
+
+        import color_override
+        color_override.probe_render_setup()              # 調べるだけ（安全）
+        color_override.probe_render_setup(try_it=True)   # 実際に掛けてみる
+        color_override.probe_render_setup(cleanup=True)  # 試した分を片付ける
+
+    `try_it=False` は**シーンを一切変更しない**。 出力をそのまま貼ってもらえば、
+    推測せずに実装できる。
+    """
+    print("=" * 60)
+    print("[%s] probe_render_setup  v%s" % (_PACKAGE, __version__))
+    print("  maya    : %s" % (_safe(cmds.about, version=True),))
+    print("  renderSetupEnable: %r"
+          % (_safe(cmds.optionVar, q="renderSetupEnable"),))
+
+    if cleanup:
+        _probe_cleanup()
+        print("=" * 60)
+        return
+
+    _probe_report()
+    if try_it:
+        _probe_try()
+    else:
+        print("")
+        print("  実際に掛けてみる: color_override.probe_render_setup(try_it=True)")
+    print("=" * 60)
+
+
+# --------------------------------------------------------------------------- #
 # ウィンドウ
 # --------------------------------------------------------------------------- #
 

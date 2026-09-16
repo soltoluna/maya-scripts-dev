@@ -1,7 +1,7 @@
 # Color Override
 
 ## 概要
-- バージョン: 0.9.0 / 対応Maya: 2024+
+- バージョン: 0.9.1 / 対応Maya: 2024+
 - 選択したオブジェクトを任意の色でフラットに塗り分け、**同じような色の
   オブジェクトの貫通（めり込み）をビューポートで見分けられるようにする**。
   元のマテリアル割り当ては記録してあるので、いつでも戻せる。
@@ -155,6 +155,15 @@ color_override.diagnose()
 シェイプごとに、シェーダー割り当ての接続（`listConnections`）とフェースの塊
 （`objectGrpCompList`）の**生の戻り値**が出ます。 途中で失敗しても
 `<ERROR ...>` と値にして続けるので、必ず最後まで出ます。
+
+**レンダーセットアップ方式（v1.0.0 予定）の下調べ**はこちら。 既定では
+シーンを一切変更しません。
+
+```python
+color_override.probe_render_setup()              # 調べるだけ（安全）
+color_override.probe_render_setup(try_it=True)   # 実際に掛けてみる
+color_override.probe_render_setup(cleanup=True)  # 試した分を片付ける
+```
 
 Apply したときの完了ログも手掛かりになります。
 
