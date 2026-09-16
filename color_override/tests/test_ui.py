@@ -323,9 +323,9 @@ class SetRowCase(unittest.TestCase):
 class FaceAssignmentCase(unittest.TestCase):
     """フェース単位でマテリアルが分かれたシェイプの読み取りと復元。
 
-    スタブは割り当てを持たないので、`listConnections` / `getAttr` を
-    差し替えて実機の**接続の形**だけを再現する。 実際に色が乗るかどうかは
-    ここでは分からない（実機確認の項目として SPEC.md に残してある）。
+    スタブは割り当てを持たないので、`listConnections` と `cmds.sets(q=True)`
+    を差し替えて**実機が返す形**だけを再現する。 実際に色が乗るかどうかは
+    ここでは分からない（確認項目は SPEC.md の「実装状況」）。
     """
 
     SHAPE = "|a|aShape"
@@ -336,46 +336,50 @@ class FaceAssignmentCase(unittest.TestCase):
         self.module = _bootstrap.reload_tool()
         self.ui = self.module.ui
         self.cmds = cmds
+        self.queried = []
 
     def _patch(self, name, func):
         setattr(self.cmds, name, func)
         self.addCleanup(lambda: delattr(self.cmds, name))
 
-    def _scene(self, connections, components=None, exists=True,
-               paired_fails=False, simple=None):
-        """割り当てを差し替える。 `connections` は `[(局所プラグ, SG プラグ)]`。
+    def _scene(self, engines, members=None, exists=True, fails=False):
+        """割り当てを差し替える。
 
-        `paired_fails` で「詳しい読み方（connections=True）だけ通らない」
-        環境を再現する（簡易読み取りへの逃げ道が効くかを見るため）。
+        `engines` はシェイプにつながっている shadingEngine、`members` は
+        `{SG 名: [メンバー...]}`（`cmds.sets(sg, q=True)` が返すもの）。
         """
-        flat = [part for pair in connections for part in pair]
-
-        def _list_connections(*_a, **kwargs):
-            if kwargs.get("connections"):
-                if paired_fails:
-                    raise RuntimeError("flag not supported")
-                return list(flat)
-            return list(simple or [])
+        def _list_connections(*_a, **_k):
+            if fails:
+                raise RuntimeError("nope")
+            return list(engines)
 
         self._patch("listConnections", _list_connections)
-        table = components or {}
 
-        def _get_attr(plug, *_a, **_k):
-            if plug.endswith(".objectGrpCompList"):
-                if plug[:-len(".objectGrpCompList")] not in table:
-                    raise RuntimeError("no such attribute")
-                return list(table[plug[:-len(".objectGrpCompList")]])
-            return None
+        table = members or {}
+        original = self.cmds.sets
 
-        self._patch("getAttr", _get_attr)
+        def _sets(*args, **kwargs):
+            if kwargs.get("q") or kwargs.get("query"):
+                name = args[0] if args else None
+                self.queried.append(name)
+                return list(table.get(name, []))
+            return original(*args, **kwargs)
+
+        self._patch("sets", _sets)
         self._patch("objExists", lambda *a, **k: exists)
 
     # -- 読み取り ------------------------------------------------------------
 
-    def test_a_plain_shape_reads_as_a_single_destination(self):
-        self._scene([("aShape.instObjGroups[0]", "lambert2SG.dagSetMembers[0]")])
+    def test_a_single_destination_needs_no_member_scan(self):
+        """**ふつうのシェイプでセットの中身を引かない。**
+
+        `initialShadingGroup` は大きいシーンで数千件返る。 対象ごとに引くと
+        掛けるたびに走査することになる。
+        """
+        self._scene(["lambert2SG"])
         self.assertEqual(self.ui._read_assignment(self.SHAPE),
                          ("lambert2SG", [], True))
+        self.assertEqual(self.queried, [], "セットの中身を引いている")
 
     def test_an_unassigned_shape_falls_back_to_the_maya_default(self):
         self._scene([])
@@ -383,11 +387,9 @@ class FaceAssignmentCase(unittest.TestCase):
                          (self.ui._DEFAULT_SG, [], True))
 
     def test_face_groups_are_read_with_their_own_destination(self):
-        self._scene(
-            [("aShape.instObjGroups[0].objectGroups[0]", "sgA.dagSetMembers[0]"),
-             ("aShape.instObjGroups[0].objectGroups[1]", "sgB.dagSetMembers[1]")],
-            {"aShape.instObjGroups[0].objectGroups[0]": ["f[0:2]"],
-             "aShape.instObjGroups[0].objectGroups[1]": ["f[3:5]", "f[9]"]})
+        self._scene(["sgA", "sgB"],
+                    {"sgA": ["|a|aShape.f[0:2]"],
+                     "sgB": ["|a|aShape.f[3:5]", "|a|aShape.f[9]"]})
         base, entries, ok = self.ui._read_assignment(self.SHAPE)
         self.assertTrue(ok)
         self.assertEqual(base, "sgA", "土台が無いときは最初の塊の SG で埋める")
@@ -395,66 +397,51 @@ class FaceAssignmentCase(unittest.TestCase):
             {"sg": "sgA", "components": ["|a|aShape.f[0:2]"]},
             {"sg": "sgB", "components": ["|a|aShape.f[3:5]", "|a|aShape.f[9]"]}])
 
-    def test_the_pair_order_from_maya_is_not_assumed(self):
-        """向きを取り違えるとシェイプ名を SG として控えてしまう。"""
-        self._scene([("lambert2SG.dagSetMembers[0]", "aShape.instObjGroups[0]")])
-        self.assertEqual(self.ui._read_assignment(self.SHAPE),
-                         ("lambert2SG", [], True))
+    def test_a_whole_membership_becomes_the_base(self):
+        """シェイプ全体のメンバーがあれば、それが土台（塗り残しの行き先）。"""
+        self._scene(["sgBase", "sgB"],
+                    {"sgBase": ["|a|aShape"],
+                     "sgB": ["|a|aShape.f[3:5]"]})
+        base, entries, ok = self.ui._read_assignment(self.SHAPE)
+        self.assertEqual(base, "sgBase")
+        self.assertEqual([entry["sg"] for entry in entries], ["sgB"])
+        self.assertTrue(ok)
 
-    def test_a_connection_that_is_not_an_assignment_is_ignored(self):
-        self._scene([("aShape.message", "sgA.someAttr")])
+    def test_another_shapes_components_are_not_taken(self):
+        """**同名シェイプのフェースを取り込まない。**
+
+        `|charA|body|bodyShape` と `|charB|body|bodyShape` が同じ SG に居ると、
+        短い名前での照合では他人のフェースを別のマテリアルへ戻してしまう。
+        """
+        self._scene(["sgA", "sgB"],
+                    {"sgA": ["|a|aShape.f[0:2]", "|b|aShape.f[7]"],
+                     "sgB": ["|b|aShape.f[0]"]})
+        base, entries, _ok = self.ui._read_assignment(self.SHAPE)
+        self.assertEqual(entries,
+                         [{"sg": "sgA", "components": ["|a|aShape.f[0:2]"]}])
+        self.assertEqual(base, "sgB", "自分の塊が無い SG は土台側に回る")
+
+    def test_no_components_at_all_is_reported(self):
+        """2 つ以上つながっているのに塊が拾えないなら、黙って 1 色にしない。"""
+        self._scene(["sgA", "sgB"])
+        base, entries, ok = self.ui._read_assignment(self.SHAPE)
+        self.assertEqual((base, entries), ("sgA", []))
+        self.assertFalse(ok)
+
+    def test_each_shading_engine_is_queried_once(self):
+        """メンバーの引き直しをしない（掛けるたびに数千件を走査しない）。"""
+        self._scene(["sgA", "sgB"],
+                    {"sgA": ["|a|aShape.f[0]"], "sgB": ["|a|aShape.f[1]"]})
+        members_of = self.ui._sg_member_reader()
+        for _ in range(3):
+            self.ui._read_assignment(self.SHAPE, members_of)
+        self.assertEqual(sorted(self.queried), ["sgA", "sgB"])
+
+    def test_reading_never_raises(self):
+        """**`_apply_one` の途中で落とさない。** 落ちれば色も乗らない。"""
+        self._scene([], fails=True)
         self.assertEqual(self.ui._read_assignment(self.SHAPE),
                          (self.ui._DEFAULT_SG, [], True))
-
-    def test_a_junk_component_list_is_filtered(self):
-        """変な名前を混ぜたまま戻すと `cmds.sets` が落ちる。 拾わない。"""
-        self._scene(
-            [("aShape.instObjGroups[0].objectGroups[0]", "sgA.dagSetMembers[0]")],
-            {"aShape.instObjGroups[0].objectGroups[0]":
-                [["f[0:2]"], "", None, "f[7]"]})
-        self.assertEqual(
-            self.ui._read_assignment(self.SHAPE)[1],
-            [{"sg": "sgA", "components": ["|a|aShape.f[0:2]",
-                                          "|a|aShape.f[7]"]}])
-
-    def test_an_object_group_without_components_is_a_whole_assignment(self):
-        """**`objectGroups` はフェース専用ではない。**
-
-        オブジェクト全体のメンバーシップでも経由し、そのときコンポーネントは
-        空になる。 v0.5.0 はこれを読み取り失敗と見なし、ふつうのシェイプにまで
-        「掛けない」判断が働いて**色がまったく掛からなくなった**。
-        """
-        self._scene(
-            [("aShape.instObjGroups[0].objectGroups[0]", "sgA.dagSetMembers[0]")],
-            {"aShape.instObjGroups[0].objectGroups[0]": []})
-        self.assertEqual(self.ui._read_assignment(self.SHAPE),
-                         ("sgA", [], True))
-
-    def test_such_a_shape_still_gets_a_colour(self):
-        """上の判定が効いていることを、掛ける側からも押さえる。"""
-        self._scene(
-            [("aShape.instObjGroups[0].objectGroups[0]", "sgA.dagSetMembers[0]")],
-            {"aShape.instObjGroups[0].objectGroups[0]": []})
-        self.assertIsNotNone(self._apply(), "ふつうのシェイプに色が掛からない")
-
-    def test_a_reader_that_cannot_run_falls_back_instead_of_refusing(self):
-        """**色が塗れないほうが害が大きい。** 読めないなら簡易読み取りに落とす。"""
-        self._scene([], paired_fails=True, simple=["lambert2SG"])
-        self.assertEqual(self.ui._read_assignment(self.SHAPE),
-                         ("lambert2SG", [], True))
-        self.assertIsNotNone(self._apply())
-
-    def test_an_empty_pair_list_falls_back_too(self):
-        """ペアで返ってこない環境でも「掛からない」にはしない。"""
-        self._scene([], simple=["lambert2SG"])
-        self.assertEqual(self.ui._read_assignment(self.SHAPE),
-                         ("lambert2SG", [], True))
-
-    def test_an_unreadable_face_group_is_reported_as_not_readable(self):
-        """塊が読めないなら「読めた」と言わない（掛けない判断の根拠になる）。"""
-        self._scene(
-            [("aShape.instObjGroups[0].objectGroups[0]", "sgA.dagSetMembers[0]")])
-        self.assertFalse(self.ui._read_assignment(self.SHAPE)[2])
 
     # -- 掛ける --------------------------------------------------------------
 
@@ -467,27 +454,29 @@ class FaceAssignmentCase(unittest.TestCase):
         """**主機能を止めない。**
 
         v0.5.0〜v0.7.1 はここで掛けるのをやめていた（戻せなくなるくらいなら
-        掛けない）。 実機ではその判断が働いて**色がまったく乗らなくなった**。
-        読めないなら警告だけ出して、v0.4.0 と同じ挙動に落ちる。
+        掛けない）。 実機ではその判断が働いて色がまったく乗らなくなった。
         """
-        self._scene(
-            [("aShape.instObjGroups[0].objectGroups[0]", "sgA.dagSetMembers[0]")])
+        self._scene(["sgA", "sgB"])
         self.assertIsNotNone(self._apply(), "色が掛からない")
         self.assertTrue(_bootstrap.MESSAGES, "読めなかったことを知らせていない")
 
+    def test_a_plain_shape_gets_a_colour(self):
+        self._scene(["lambert2SG"])
+        self.assertIsNotNone(self._apply())
+
     def test_the_face_groups_are_written_to_the_shader(self):
-        """復元の情報源はシーン側。 Python の辞書に持つと開き直した時点で失う。"""
-        self._scene(
-            [("aShape.instObjGroups[0].objectGroups[0]", "sgA.dagSetMembers[0]")],
-            {"aShape.instObjGroups[0].objectGroups[0]": ["f[0:2]"]})
+        """復元の情報源はシーン側。 辞書に持つと開き直した時点で失う。"""
+        self._scene(["sgA", "sgB"],
+                    {"sgA": ["|a|aShape.f[0:2]"], "sgB": ["|a|aShape.f[3]"]})
         self.assertIsNotNone(self._apply())
         written = [args[1] for name, args, _k in _bootstrap.CALLS
                    if name == "setAttr" and len(args) > 1
                    and str(args[0]).endswith(self.ui._ATTR_FACES)]
         self.assertEqual(len(written), 1, "フェースの控えが書かれていない")
         self.assertEqual(core.decode_faces(written[0]),
-                         {self.SHAPE: [{"sg": "sgA",
-                                        "components": ["|a|aShape.f[0:2]"]}]})
+                         {self.SHAPE: [
+                             {"sg": "sgA", "components": ["|a|aShape.f[0:2]"]},
+                             {"sg": "sgB", "components": ["|a|aShape.f[3]"]}]})
 
     # -- 戻す ----------------------------------------------------------------
 
@@ -508,6 +497,21 @@ class FaceAssignmentCase(unittest.TestCase):
                           ("sgA", ["|a|aShape.f[0:2]"]),
                           ("sgB", ["|a|aShape.f[3:5]"])])
 
+    def test_hiding_puts_the_faces_back_too(self):
+        """**Hide でフェース割り当てが消えた**（実機からの指摘）の回帰。"""
+        record = {"shader": "shd", "sg": "ovrSG", "enabled": True,
+                  "original": "sgBase", "members": [self.SHAPE],
+                  "originals": ["sgBase"],
+                  "faces": {self.SHAPE: [
+                      {"sg": "sgA", "components": ["|a|aShape.f[0:2]"]},
+                      {"sg": "sgB", "components": ["|a|aShape.f[3:5]"]}]}}
+        self._scene([])
+        self.assertEqual(self.ui._disable_records([record]), 1)
+        self.assertEqual(self._force_element_calls(),
+                         [("sgBase", [self.SHAPE]),
+                          ("sgA", ["|a|aShape.f[0:2]"]),
+                          ("sgB", ["|a|aShape.f[3:5]"])])
+
     def test_a_component_whose_shape_is_gone_is_skipped(self):
         """消えたノードへ戻そうとして操作ごと落ちないこと。"""
         self._scene([], exists=False)
@@ -516,6 +520,7 @@ class FaceAssignmentCase(unittest.TestCase):
             "faces": {self.SHAPE: [
                 {"sg": "sgA", "components": ["|a|aShape.f[0:2]"]}]}}])
         self.assertEqual(self._force_element_calls(), [])
+
 
 
 def _set_entry(name, applied, enabled=True, count=2):

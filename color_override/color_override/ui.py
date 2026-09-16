@@ -101,10 +101,9 @@ _ATTR_ORIGINALS = NAMESPACE + "ColorOverrideOriginals"
 # 入れ子（SG ごとのフェースの塊）を表せないのでここだけ形が違う
 _ATTR_FACES = NAMESPACE + "ColorOverrideFaces"
 
-# シェイプから SG への割り当ては instObjGroups を経由する。 フェース単位なら
-# さらに objectGroups[n] が挟まる。 **接続プラグの形が判別そのもの**で、
-# SG のメンバーを引かずに済むのはこのおかげ
-_MEMBER_PLUG = ".instObjGroups"
+# フェース単位の割り当ては instObjGroups[0].objectGroups[n] を経由する。
+# **判別には使わない**（v0.5.0〜v0.8.0 はここから塊を読もうとして拾えなかった）。
+# `diagnose()` が実機の中身を見せるためだけに残してある
 _FACE_PLUG = ".objectGroups["
 
 # 所属セット名。 一覧を畳む単位で、これが無い記録（v0.3.0 以前）は Unnamed へ
@@ -157,121 +156,86 @@ def _listed(value):
     return list(value) if isinstance(value, (list, tuple)) else [value]
 
 
-def _component_list(plug, shape):
-    """`objectGroups[n]` が抱えるフェースの塊を `(塊, 読めたか)` で返す。
+def _sg_member_reader():
+    """shadingEngine のメンバー一覧を引く関数。 **同じ SG は 1 回しか引かない。**
 
-    `objectGrpCompList` は `['f[0:2]', 'f[7]']` のような形で返る。 SG の
-    メンバー（`cmds.sets(sg, q=True)`）を舐めるより安く、しかも
-    **どの SG のどのフェースか**が接続から直接たどれる。
-
-    **空（`[]` / `None`）は「読めなかった」ではない。** `objectGroups` は
-    フェース割り当て専用ではなく、**オブジェクト全体のメンバーシップでも
-    経由する**。 その場合コンポーネントは 1 つも入っていない。 v0.5.0 は
-    これを読み取り失敗と見なしたため、ふつうのシェイプにまで
-    「掛けない」判断が働き、**色がまったく掛からなくなった**（v0.7.1 で修正）。
-
-    「読めなかった」は次の 2 つだけ:
-
-      * `getAttr` そのものが失敗した
-      * 中身があるのに `f[...]` の形が 1 つも取れなかった
-        （変な名前を混ぜると戻すときの `cmds.sets` が落ちるので拾わない）
+    `initialShadingGroup` は大きいシーンで数千件返る。 対象ごとに引くと
+    掛けるたびに走査することになるので、1 回の操作の中で使い回す。
     """
-    try:
-        value = cmds.getAttr(plug + ".objectGrpCompList")
-    except Exception:
-        return ([], False)
+    cache = {}
 
-    items = []
-    for item in _listed(value):
-        # 実機の戻りが入れ子だった場合に備えて 1 段だけほどく
-        items.extend(_listed(item) if isinstance(item, (list, tuple))
-                     else [item])
-    if not items:
-        return ([], True)      # 空 = オブジェクト全体のメンバー
+    def _members(engine):
+        if engine not in cache:
+            try:
+                raw = _listed(cmds.sets(engine, q=True))
+                cache[engine] = _listed(cmds.ls(*raw, long=True)) if raw else []
+            except Exception:
+                cache[engine] = []
+        return cache[engine]
 
-    components = ["%s.%s" % (shape, item) for item in items
-                  if isinstance(item, str) and "[" in item]
-    return (components, bool(components))
+    return _members
 
 
-def _simple_engine_of(shape):
-    """シェイプにつながっている shadingEngine（最初の 1 つ）。
+def _components_of(members, shape):
+    """`members` のうち `shape` のコンポーネントだけを返す。
 
-    **v0.4.0 までの読み方。** 新しい読み方が通らない環境でも、せめて
-    シェイプ単位では戻せるようにするための逃げ道として残してある。
+    **持ち主はフルパスで突き合わせる。** 短い名前で照合すると、別グループの
+    同名シェイプ（`|charA|body|bodyShape` と `|charB|body|bodyShape`）の
+    フェースを取り込み、**他人のフェースを別のマテリアルへ戻す**事故になる。
     """
-    try:
-        found = _listed(cmds.listConnections(shape, type="shadingEngine"))
-    except Exception:
-        # ここまで失敗するなら戻し先は分からない。 **それでも落とさない** —
-        # 例外が上がると `_apply_one` ごと止まり、色も乗らなくなる
-        return _DEFAULT_SG
-    return found[0] if found else _DEFAULT_SG
+    return [name for name in members
+            if core.is_component(name) and core.component_owner(name) == shape]
 
 
-def _read_assignment(shape):
+def _read_assignment(shape, members_of=None):
     """シェイプの現在の割り当てを `(戻し先, フェースの塊, 読めたか)` で返す。
 
-    **フェース単位（マルチマテリアル）かどうかは接続プラグの形で分かる。**
-    ふつうのシェイプは `instObjGroups[0]` が直接 SG につながるので、
-    セットの中身を引かずに済む（大きいシーンの `initialShadingGroup` を
-    舐めない）。
+    **shadingEngine が 1 つなら、それが戻し先。** フェースで分かれていても
+    行き先が 1 つなら、シェイプ全体で戻して同じ結果になる。 ここで打ち切る
+    ので、**ふつうのシェイプはセットの中身を引かずに済む**。
 
-    「読めたか」が False なのは、フェースの塊が入っているはずなのに
-    読み出せなかったとき。 **この場合は色を掛けない。** 掛けてしまうと
-    `forceElement` が元の分割を落とし、戻す手掛かりがどこにも残らない。
+    **2 つ以上つながっていればフェースで分かれている。** そのときだけ
+    SG のメンバーを引いて、このシェイプのコンポーネントを拾う。
 
-    **ただし読み方そのものが通らないときは、掛かるほうを優先して
-    v0.4.0 の読み方に落とす。** 色を塗るのがこのツールの主目的で、
-    それが丸ごと動かなくなるほうが害が大きい（v0.7.1）。
+    v0.5.0〜v0.8.0 は `instObjGroups[0].objectGroups[n].objectGrpCompList` を
+    直接読んでいたが、**実機では塊を拾えず**（Hide でフェース割り当てが
+    消えた）。 `cmds.sets(sg, q=True)` は割り当てを読むのに広く使われている
+    経路で、こちらに寄せた（v0.9.0）。
+
+    **読み取りは例外を上げない。** `_apply_one` の途中で落ちると色も乗らない。
     """
     try:
-        pairs = _listed(cmds.listConnections(shape, type="shadingEngine",
-                                             connections=True, plugs=True))
+        engines = core.unique(
+            _listed(cmds.listConnections(shape, type="shadingEngine")))
     except Exception as exc:
-        cmds.warning("[%s] 割り当てを詳しく読めないので簡易読み取りに落とします"
-                     "（%s）: %s" % (_PACKAGE, core.short_name(shape), exc))
-        return (_simple_engine_of(shape), [], True)
+        cmds.warning("[%s] 割り当てを読めません（%s）: %s"
+                     % (_PACKAGE, core.short_name(shape), exc))
+        return (_DEFAULT_SG, [], True)
 
-    if not pairs:
-        # つながっていないか、ペアで返ってこない環境。 どちらでも
-        # 「掛からない」にはしない
-        return (_simple_engine_of(shape), [], True)
+    if not engines:
+        return (_DEFAULT_SG, [], True)
+    if len(engines) == 1:
+        return (engines[0], [], True)
 
+    members_of = members_of or _sg_member_reader()
     wholes = []
     entries = []
-    unreadable = False
-    for index in range(0, len(pairs) - 1, 2):
-        local, remote = pairs[index], pairs[index + 1]
-        # **向きを当てにしない。** シェイプ側のプラグは必ず instObjGroups を
-        # 通るので、そちらで見分ける。 取り違えるとシェイプ名を SG として
-        # 控えてしまい、戻すときに存在しない SG を指す
-        if _MEMBER_PLUG not in (local or ""):
-            if _MEMBER_PLUG in (remote or ""):
-                local, remote = remote, local
-            else:
-                continue
-        engine = (remote or "").split(".", 1)[0]
-        if not engine:
-            continue
-        if _FACE_PLUG not in (local or ""):
-            wholes.append(engine)
-            continue
-        components, readable = _component_list(local, shape)
+    for engine in engines:
+        components = _components_of(members_of(engine), shape)
         if components:
             entries.append({"sg": engine, "components": components})
-        elif readable:
-            # コンポーネントを持たない objectGroups = オブジェクト全体の
-            # メンバーシップ。 フェース割り当てではない
-            wholes.append(engine)
         else:
-            unreadable = True
+            # つながっているのにコンポーネントが無い = シェイプ全体のメンバー
+            wholes.append(engine)
 
     if not entries:
-        return (wholes[0] if wholes else _DEFAULT_SG, [], not unreadable)
+        # 2 つ以上つながっているのに塊が拾えない。 戻し先を 1 つに決めるしか
+        # 無いので、**そのことを知らせる**（黙って 1 色にまとめない）
+        return (wholes[0], [], False)
+
     # 土台はシェイプ全体に掛かっていた SG。 全面がフェース割り当てなら
     # 最初の塊の SG で埋める（どの塊にも入らないフェースの行き先になる）
-    return (wholes[0] if wholes else entries[0]["sg"], entries, not unreadable)
+    return (wholes[0] if wholes else entries[0]["sg"], entries, True)
 
 
 def _is_override_shader(shader):
@@ -629,12 +593,13 @@ def _assignment_resolver(records):
                              True)
 
     cache = {}
+    members_of = _sg_member_reader()     # SG のメンバーは 1 回だけ引く
 
     def _resolve(shape):
         if shape in known:
             return known[shape]
         if shape not in cache:
-            cache[shape] = _read_assignment(shape)
+            cache[shape] = _read_assignment(shape, members_of)
         return cache[shape]
 
     return _resolve
@@ -1432,8 +1397,22 @@ def diagnose():
         for shape in _shapes_of(node):
             print("  shape : %r" % (shape,))
             print("    exists : %r" % (_safe(cmds.objExists, shape),))
-            simple = _safe(cmds.listConnections, shape, type="shadingEngine")
-            print("    SGs (simple)   : %r" % (simple,))
+            engines = _safe(cmds.listConnections, shape, type="shadingEngine")
+            print("    SGs            : %r" % (engines,))
+
+            # **いま割り当てを読んでいる経路**。 ここが実機で何を返すかが
+            # 分かれば、フェースの塊を拾えない理由がそのまま分かる
+            for engine in (engines if isinstance(engines, (list, tuple)) else []):
+                raw = _safe(cmds.sets, engine, q=True)
+                print("      sets(%s, q=True) = %r" % (engine, raw))
+                if isinstance(raw, (list, tuple)) and raw:
+                    listed = _safe(cmds.ls, *raw, long=True)
+                    print("        ls(long=True)  = %r" % (listed,))
+                    if isinstance(listed, (list, tuple)):
+                        print("        mine           = %r"
+                              % (_safe(_components_of, listed, shape),))
+
+            # v0.8.0 まで使っていた経路（拾えなかった側）も併せて出す
             paired = _safe(cmds.listConnections, shape, type="shadingEngine",
                            connections=True, plugs=True)
             print("    SGs (c+plugs)  : %r" % (paired,))
