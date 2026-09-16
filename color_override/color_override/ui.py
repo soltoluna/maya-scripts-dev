@@ -77,6 +77,10 @@ _OPTVAR_LAST_COLOR = _NS + "_last_color"         # ntk_color_override_last_color
 # にしてある。 覚えずに捨てると、書き出した控えを二度と読めず復元できない
 _OPTVAR_BACKUP_PATH = _NS + "_backup_path"
 
+# **その選択をどのシーンで行ったか。** optionVar は Maya の設定として残るので、
+# これが無いと別のシーン（新規シーンを含む）にまで前の控えが付いてくる
+_OPTVAR_BACKUP_SCENE = _NS + "_backup_scene"
+
 # シーンに作るノードにも名前空間を付ける。 実機のシーンには他の人が作った
 # ノードも同居するため
 _NODE_PREFIX = _NS
@@ -196,7 +200,12 @@ def _simple_engine_of(shape):
     **v0.4.0 までの読み方。** 新しい読み方が通らない環境でも、せめて
     シェイプ単位では戻せるようにするための逃げ道として残してある。
     """
-    found = _listed(cmds.listConnections(shape, type="shadingEngine"))
+    try:
+        found = _listed(cmds.listConnections(shape, type="shadingEngine"))
+    except Exception:
+        # ここまで失敗するなら戻し先は分からない。 **それでも落とさない** —
+        # 例外が上がると `_apply_one` ごと止まり、色も乗らなくなる
+        return _DEFAULT_SG
     return found[0] if found else _DEFAULT_SG
 
 
@@ -369,9 +378,22 @@ def _scene_path():
 
 
 def _chosen_backup_path():
-    """ユーザーが明示的に選んだ控え（選んでいなければ None）。"""
+    """ユーザーが明示的に選んだ控え（選んでいなければ None）。
+
+    **選んだときと別のシーンなら持ち越さない。** optionVar は Maya の設定
+    として残るので、そのまま使うと**新規シーンにまで前の控えが付いてくる**
+    （v0.8.0 で修正）。 食い違っていたらその場で捨てる。
+    """
     if not cmds.optionVar(exists=_OPTVAR_BACKUP_PATH):
         return None
+
+    stored = ""
+    if cmds.optionVar(exists=_OPTVAR_BACKUP_SCENE):
+        stored = cmds.optionVar(q=_OPTVAR_BACKUP_SCENE) or ""
+    if stored != _scene_path():
+        _remember_backup_path(None)
+        return None
+
     return cmds.optionVar(q=_OPTVAR_BACKUP_PATH) or None
 
 
@@ -474,11 +496,28 @@ def _backup_sets(sets):
 
 
 def _remember_backup_path(path):
-    """以降この控えを見る（`None` で選択を解除し、シーンの隣へ戻す）。"""
+    """以降この控えを見る（`None` で選択を解除し、シーンの隣へ戻す）。
+
+    **どのシーンで選んだかも一緒に覚える。** 覚えないと、別のシーンを開いても
+    前の控えを読み続ける。
+    """
     if path:
         cmds.optionVar(sv=(_OPTVAR_BACKUP_PATH, path))
-    elif cmds.optionVar(exists=_OPTVAR_BACKUP_PATH):
-        cmds.optionVar(remove=_OPTVAR_BACKUP_PATH)
+        cmds.optionVar(sv=(_OPTVAR_BACKUP_SCENE, _scene_path()))
+        return
+    for key in (_OPTVAR_BACKUP_PATH, _OPTVAR_BACKUP_SCENE):
+        if cmds.optionVar(exists=key):
+            cmds.optionVar(remove=key)
+
+
+def _on_scene_changed(*_args):
+    """シーンが切り替わったら控えの選択を捨てる。
+
+    シーン名での突き合わせだけでは、**未保存 → 新規シーン**（どちらも空の
+    シーン名）を見分けられない。 開き直しの合図そのものを拾う。
+    """
+    _remember_backup_path(None)
+    cmds.evalDeferred(_refresh_list)
 
 
 def _forget_backup(name):
@@ -655,10 +694,14 @@ def _apply_one(node, rgb, set_name, records, index, resolve_assignment):
     グループノードを渡すと、**中のシェイプを全部拾って 1 件の記録にまとめる**。
     戻し先はシェイプごとに控えるので、中身のマテリアルがばらばらでも戻せる。
 
-    **フェース単位の割り当てを読み取れないシェイプが 1 つでもあれば、その
-    ノードには掛けずに `None` を返す。** 掛けた時点で元の分割が落ち、戻す
-    手掛かりがどこにも残らないため（グループなら中の 1 つでも駄目なら止める。
-    半分だけ掛かっているほうが分かりにくい）。
+    **フェース単位の割り当てが読み取れなくても掛ける。** v0.5.0〜v0.7.1 は
+    「戻せなくなるくらいなら掛けない」として `None` を返していたが、
+    実機ではその判断が働いて**色がまったく乗らなくなった**（v0.8.0 で撤回）。
+    読み取れなかったシェイプは警告だけ出して、v0.4.0 と同じ
+    「シェイプ全体を 1 つの SG へ戻す」に落ちる。
+
+    **色を塗れることがこのツールの主機能で、フェース分割の復元は付随的。
+    付随的なもののために主機能を止めない。**
     """
     record = index.get(node) or index.get(core.short_name(node))
 
@@ -684,15 +727,16 @@ def _apply_one(node, rgb, set_name, records, index, resolve_assignment):
     # **割り当てを書き換える前に、シェイプごとの戻し先を控える。**
     assignments = [resolve_assignment(shape) for shape in shapes]
 
-    # 読み取れないフェース割り当てがあれば掛けない（A: 静かに壊さない）
-    blocked = [shape for shape, item in zip(shapes, assignments) if not item[2]]
-    if blocked:
+    # 読み取れなかったシェイプは知らせるだけ。 **掛けるのは止めない**
+    unreadable = [shape for shape, item in zip(shapes, assignments)
+                  if not item[2]]
+    if unreadable:
         cmds.warning(
-            "[%s] %s: フェース単位の割り当てを読み取れないシェイプが %d 個あるため"
-            "掛けませんでした（戻せなくなるため）。 例: %s"
-            % (_PACKAGE, core.short_name(node), len(blocked),
-               core.short_name(blocked[0])))
-        return None
+            "[%s] %s: %d 個のシェイプでフェース単位の割り当てを読み取れません"
+            "でした。 色は掛けますが、Restore ではそのシェイプのマテリアルが"
+            "1 つにまとまります。 例: %s"
+            % (_PACKAGE, core.short_name(node), len(unreadable),
+               core.short_name(unreadable[0])))
 
     originals = [item[0] for item in assignments]
     faces = {shape: item[1]
@@ -1345,6 +1389,64 @@ def _on_open_backup(*_args):
 
 
 # --------------------------------------------------------------------------- #
+# 調べる（実機から生データを持ち帰るため）
+# --------------------------------------------------------------------------- #
+
+def _safe(func, *args, **kwargs):
+    """例外を値として返す。 調査中に途中で止まらないようにするため。"""
+    try:
+        return func(*args, **kwargs)
+    except Exception as exc:
+        return "<ERROR %s: %s>" % (type(exc).__name__, exc)
+
+
+def diagnose():
+    """**選択物の割り当てを、そのまま貼れる形で Script Editor に出す。**
+
+    開発機に Maya が無いので、`listConnections` や `objectGrpCompList` が
+    実機で何を返すのかは**持ち帰るしかない**。 v0.5.0 の「色が乗らない」は
+    まさにここの想像違いで、推測で直しては外すのを繰り返した。 1 回で
+    生データを取りに行くほうが早い。
+
+        import color_override
+        color_override.diagnose()
+
+    出力をそのまま貼ってもらえれば、どの段で読み損ねているかが分かる。
+    """
+    print("=" * 60)
+    print("[%s] diagnose  v%s" % (_PACKAGE, __version__))
+    print("  maya    : %s" % (_safe(cmds.about, version=True),))
+    print("  scene   : %r" % (_safe(_scene_path),))
+    print("  backup  : %r" % (_safe(_backup_path),))
+    print("  chosen  : %r" % (_safe(_chosen_backup_path),))
+
+    nodes = _selected_objects()
+    if not nodes:
+        print("  selection: なし（調べたいオブジェクトを選んでから実行）")
+        print("=" * 60)
+        return
+
+    for node in nodes:
+        print("-" * 60)
+        print("  node  : %r" % (node,))
+        for shape in _shapes_of(node):
+            print("  shape : %r" % (shape,))
+            print("    exists : %r" % (_safe(cmds.objExists, shape),))
+            simple = _safe(cmds.listConnections, shape, type="shadingEngine")
+            print("    SGs (simple)   : %r" % (simple,))
+            paired = _safe(cmds.listConnections, shape, type="shadingEngine",
+                           connections=True, plugs=True)
+            print("    SGs (c+plugs)  : %r" % (paired,))
+            for plug in (paired if isinstance(paired, (list, tuple)) else []):
+                if _FACE_PLUG in str(plug):
+                    print("      %s.objectGrpCompList = %r"
+                          % (plug, _safe(cmds.getAttr,
+                                         str(plug) + ".objectGrpCompList")))
+            print("    _read_assignment: %r" % (_safe(_read_assignment, shape),))
+    print("=" * 60)
+
+
+# --------------------------------------------------------------------------- #
 # ウィンドウ
 # --------------------------------------------------------------------------- #
 
@@ -1463,6 +1565,11 @@ def show():
 
     # バージョン表示 + 「GitHub から更新」。 全ツール共通なので消さない
     dev_tools.build_footer()
+
+    # シーンが切り替わったら控えの選択を捨てる。 ウィンドウに紐付けるので
+    # 閉じれば一緒に消える（外し忘れて残り続けることが無い）
+    for event in ("NewSceneOpened", "SceneOpened"):
+        cmds.scriptJob(event=[event, _on_scene_changed], parent=win)
 
     cmds.showWindow(win)
     _refresh_list()

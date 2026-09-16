@@ -463,14 +463,17 @@ class FaceAssignmentCase(unittest.TestCase):
         return self.ui._apply_one(node, (1.0, 0.0, 0.0), "Set 1", records,
                                   index, self.ui._assignment_resolver([]))
 
-    def test_a_shape_whose_faces_cannot_be_read_is_not_touched(self):
-        """**掛けた時点で元の分割が落ちる。** 読めないなら掛けない。"""
+    def test_a_shape_whose_faces_cannot_be_read_still_gets_a_colour(self):
+        """**主機能を止めない。**
+
+        v0.5.0〜v0.7.1 はここで掛けるのをやめていた（戻せなくなるくらいなら
+        掛けない）。 実機ではその判断が働いて**色がまったく乗らなくなった**。
+        読めないなら警告だけ出して、v0.4.0 と同じ挙動に落ちる。
+        """
         self._scene(
             [("aShape.instObjGroups[0].objectGroups[0]", "sgA.dagSetMembers[0]")])
-        self.assertIsNone(self._apply())
-        self.assertTrue(_bootstrap.MESSAGES, "警告が出ていない")
-        self.assertNotIn("shadingNode",
-                         [name for name, _a, _k in _bootstrap.CALLS])
+        self.assertIsNotNone(self._apply(), "色が掛からない")
+        self.assertTrue(_bootstrap.MESSAGES, "読めなかったことを知らせていない")
 
     def test_the_face_groups_are_written_to_the_shader(self):
         """復元の情報源はシーン側。 Python の辞書に持つと開き直した時点で失う。"""
@@ -609,8 +612,7 @@ class BackupPathCase(unittest.TestCase):
         self.ui = self.module.ui
 
     def test_an_unsaved_scene_falls_back_to_the_remembered_path(self):
-        from maya import cmds
-        cmds.optionVar(sv=(self.ui._OPTVAR_BACKUP_PATH, "C:/tmp/x.json"))
+        self.ui._remember_backup_path("C:/tmp/x.json")
         self.assertEqual(self.ui._backup_path(), "C:/tmp/x.json")
 
     def test_choosing_a_path_remembers_it(self):
@@ -666,10 +668,35 @@ class BackupChooserCase(unittest.TestCase):
 
     def test_a_chosen_backup_wins_over_the_scene_neighbour(self):
         """選んだのに既定を見続けると、選べた意味が無い。"""
-        from maya import cmds
         self.ui._scene_path = lambda: "C:/work/shot010.ma"
-        cmds.optionVar(sv=(self.ui._OPTVAR_BACKUP_PATH, "D:/shared/team.json"))
+        self.ui._remember_backup_path("D:/shared/team.json")
         self.assertEqual(self.ui._backup_path(), "D:/shared/team.json")
+
+    def test_the_choice_does_not_follow_you_into_another_scene(self):
+        """**新規シーンに前の控えが付いてくる**のを止める（実機からの指摘）。"""
+        self.ui._scene_path = lambda: "C:/work/shot010.ma"
+        self.ui._remember_backup_path("D:/shared/team.json")
+
+        self.ui._scene_path = lambda: ""          # 新規シーン
+        self.assertIsNone(self.ui._chosen_backup_path())
+        self.assertIsNone(self.ui._backup_path())
+
+    def test_a_dropped_choice_is_not_asked_about_again(self):
+        """持ち越さないと決めたら optionVar も片付ける。"""
+        self.ui._scene_path = lambda: "C:/work/shot010.ma"
+        self.ui._remember_backup_path("D:/shared/team.json")
+        self.ui._scene_path = lambda: "C:/work/other.ma"
+        self.ui._chosen_backup_path()
+        self.assertNotIn(self.ui._OPTVAR_BACKUP_PATH, _bootstrap.OPTION_VARS)
+        self.assertNotIn(self.ui._OPTVAR_BACKUP_SCENE, _bootstrap.OPTION_VARS)
+
+    def test_opening_a_scene_drops_the_choice(self):
+        """未保存 → 新規シーンはシーン名では見分けられない（合図を拾う）。"""
+        self.ui._scene_path = lambda: ""
+        self.ui._remember_backup_path("D:/shared/team.json")
+        self.assertEqual(self.ui._backup_path(), "D:/shared/team.json")
+        self.ui._on_scene_changed()
+        self.assertIsNone(self.ui._chosen_backup_path())
 
     def test_choosing_a_backup_with_sets_switches_to_it(self):
         path = self._write("team.json",
@@ -697,20 +724,86 @@ class BackupChooserCase(unittest.TestCase):
         self.assertIsNone(self.ui._chosen_backup_path())
 
     def test_cancelling_keeps_the_current_backup(self):
-        from maya import cmds
-        cmds.optionVar(sv=(self.ui._OPTVAR_BACKUP_PATH, "D:/shared/team.json"))
+        self.ui._remember_backup_path("D:/shared/team.json")
         self._dialog_returns([])
         self.ui._on_choose_backup()
         self.assertEqual(self.ui._backup_path(), "D:/shared/team.json")
 
     def test_reset_goes_back_to_the_scene_neighbour(self):
-        from maya import cmds
         self.ui._scene_path = lambda: "C:/work/shot010.ma"
-        cmds.optionVar(sv=(self.ui._OPTVAR_BACKUP_PATH, "D:/shared/team.json"))
+        self.ui._remember_backup_path("D:/shared/team.json")
         self.ui._on_reset_backup()
         self.assertIsNone(self.ui._chosen_backup_path())
         self.assertEqual(self.ui._backup_path(),
                          "C:/work/shot010.color_override.json")
+
+
+class DiagnoseCase(unittest.TestCase):
+    """実機から生データを持ち帰るための出力。
+
+    **開発機に Maya が無いので、`listConnections` や `objectGrpCompList` が
+    実機で何を返すかは持ち帰るしかない。** 推測で直しては外すのを繰り返した
+    反省から入れたもの。
+    """
+
+    def setUp(self):
+        _bootstrap.reset_registry()
+        self.module = _bootstrap.reload_tool()
+        self.ui = self.module.ui
+
+    def test_diagnose_is_exposed_on_the_package(self):
+        self.assertTrue(callable(getattr(self.module, "diagnose", None)))
+        self.assertIn("diagnose", self.module.__all__)
+
+    def test_diagnose_without_a_selection_does_not_raise(self):
+        _bootstrap.set_selection([])
+        self.module.diagnose()
+
+    def test_diagnose_survives_commands_that_fail(self):
+        """**途中で止まらないこと。** 止まると肝心の行が出ない。"""
+        from maya import cmds
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("nope")
+
+        cmds.listConnections = _boom
+        self.addCleanup(lambda: delattr(cmds, "listConnections"))
+        _bootstrap.set_selection(["|a|aShape"])
+        self.module.diagnose()   # 例外が出なければよい
+
+    def test_reading_an_assignment_never_raises(self):
+        """**`_apply_one` の途中で落とさない。** 落ちれば色も乗らない。"""
+        from maya import cmds
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("nope")
+
+        cmds.listConnections = _boom
+        self.addCleanup(lambda: delattr(cmds, "listConnections"))
+        self.assertEqual(self.ui._read_assignment("|a|aShape"),
+                         (self.ui._DEFAULT_SG, [], True))
+
+
+class SceneWatchCase(unittest.TestCase):
+    """シーンの切り替えを拾って控えの選択を捨てる。"""
+
+    def setUp(self):
+        _bootstrap.reset_registry()
+        self.module = _bootstrap.reload_tool()
+        self.ui = self.module.ui
+
+    def test_show_watches_for_scene_changes(self):
+        self.module.show()
+        events = [job.get("event") for job in _bootstrap.SCRIPT_JOBS.values()]
+        watched = [event[0] for event in events if event]
+        self.assertIn("NewSceneOpened", watched)
+        self.assertIn("SceneOpened", watched)
+
+    def test_the_jobs_die_with_the_window(self):
+        """外し忘れて残り続けないこと（ウィンドウに紐付ける）。"""
+        self.module.show()
+        parents = [job.get("parent") for job in _bootstrap.SCRIPT_JOBS.values()]
+        self.assertEqual(set(parents), {self.ui.WINDOW})
 
 
 if __name__ == "__main__":

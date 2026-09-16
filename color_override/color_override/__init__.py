@@ -42,7 +42,7 @@
 from __future__ import annotations
 
 # 先に定義する（サブモジュールが `from . import __version__` で参照するため）
-__version__ = "0.7.1"
+__version__ = "0.8.0"
 
 # シェルフボタンに出す短い名前（10 文字以内）。 ハブ `install.py` がここを読んで
 # ボタンを貼る。 **表示名であってツール名ではない**ので接頭辞は付けない
@@ -65,13 +65,25 @@ from . import core      # noqa: E402  Maya 非依存の純ロジック
 from . import dev_tools  # noqa: E402  バージョン表示 / GitHub から更新
 from . import ui        # noqa: E402  cmds による UI
 
-__all__ = ["show", "toggle", "core", "ui", "dev_tools", "__version__",
-           "NAMESPACE", "SHELF_LABEL"]
+__all__ = ["show", "toggle", "diagnose", "core", "ui", "dev_tools",
+           "__version__", "NAMESPACE", "SHELF_LABEL"]
 
 
 def show():
     """ツールウィンドウを開く。 シェルフボタンが呼ぶ入口。"""
     return ui.show()
+
+
+def diagnose():
+    """選択物の割り当てを Script Editor に出す（不具合の切り分け用）。
+
+    開発機に Maya が無く、`listConnections` や `objectGrpCompList` が実機で
+    何を返すのかは持ち帰るしかない。 出力をそのまま貼ってもらう前提の形。
+
+        import color_override
+        color_override.diagnose()
+    """
+    return ui.diagnose()
 
 
 def toggle():
