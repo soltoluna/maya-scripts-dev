@@ -4,12 +4,13 @@
 **このモジュールは `maya` を import しない。** 開発機に Maya が無いので、
 ここに寄せた処理だけが自宅で実行・テストできる（`docs/TOOL_SCAFFOLD.md`）。
 
-このツールで `core` が持っているのは次の 4 つ:
+このツールで `core` が持っているのは次の 5 つ:
 
     * 識別色の生成       — 何個並べても隣り合う色が似ないようにする
     * 16 進カラーの往復  — UI のテキスト入力と RGB の相互変換
     * ノード名の組み立て — オーバーライド用シェーダー / セットの命名と無害化
     * 記録の突き合わせ   — 「選択されているもの」と「オーバーライド済みのもの」
+    * 戻し先の組み立て   — フェース単位の割り当てを含む「元へ戻す手順」
 
 `ui.py` 側に残るのは `cmds` の呼び出しだけで、判断はすべてここにある。
 """
@@ -265,6 +266,126 @@ def split_members(text):
     return [name for name in (text or "").split(_MEMBER_SEP) if name]
 
 
+# --------------------------------------------------------------------------- #
+# フェース単位の割り当て（マルチマテリアル）
+# --------------------------------------------------------------------------- #
+#
+# **シェイプ 1 つ = マテリアル 1 つとは限らない。** フェースごとに別のマテリアルが
+# 割り当てられているモデルでは、戻し先は「SG 1 つ」ではなく
+# 「(SG, そこに入っていたフェースの塊) の並び」になる。 `;` 区切りでは
+# 入れ子を表せないので、この分だけ JSON にしてシェーダーへ書く。
+
+def split_component(name):
+    """`|a|aShape.f[0:2]` を `('|a|aShape', 'f[0:2]')` に分ける。
+
+    コンポーネントでなければ後ろは空。 名前空間の `:` や階層の `|` を
+    含んでいても、区切りは**最後の `|` より後ろの最初の `.`** だけを見る。
+
+    >>> split_component("|a|aShape.f[0:2]")
+    ('|a|aShape', 'f[0:2]')
+    >>> split_component("|a|aShape")
+    ('|a|aShape', '')
+    >>> split_component("ns:aShape.f[3]")
+    ('ns:aShape', 'f[3]')
+    >>> split_component("")
+    ('', '')
+    """
+    text = name or ""
+    head, sep, tail = text.rpartition("|")
+    node, dot, component = tail.partition(".")
+    if not dot:
+        return (text, "")
+    return (head + sep + node, component)
+
+
+def component_owner(name):
+    """コンポーネント名から、持ち主のシェイプを取り出す。
+
+    >>> component_owner("|a|aShape.f[0:2]")
+    '|a|aShape'
+    >>> component_owner("|a|aShape")
+    '|a|aShape'
+    """
+    return split_component(name)[0]
+
+
+def is_component(name):
+    """フェースなどのコンポーネント名か。
+
+    >>> is_component("|a|aShape.f[0]")
+    True
+    >>> is_component("|a|aShape")
+    False
+    """
+    return bool(split_component(name)[1])
+
+
+def encode_faces(faces):
+    """メンバーごとのフェース割り当てを、属性に書ける 1 本の文字列にする。
+
+    形は `{"<メンバー>": [{"sg": "<SG>", "components": ["<コンポーネント>"]}]}`。
+    空なら空文字（属性を無駄に埋めない）。
+
+    >>> encode_faces({"|a": [{"sg": "sgA", "components": ["|a.f[0]"]}]})
+    '{"|a": [{"components": ["|a.f[0]"], "sg": "sgA"}]}'
+    >>> encode_faces({})
+    ''
+    """
+    cleaned = {}
+    for member, entries in (faces or {}).items():
+        kept = [{"sg": str(entry.get("sg") or ""),
+                 "components": [str(c) for c in entry.get("components") or []]}
+                for entry in entries or [] if entry.get("components")]
+        if member and kept:
+            cleaned[str(member)] = kept
+    if not cleaned:
+        return ""
+    return json.dumps(cleaned, sort_keys=True, ensure_ascii=False)
+
+
+def decode_faces(text):
+    """`encode_faces` の逆。 **読めない項目は黙って捨てる。**
+
+    ここが例外を投げると、シーンを開いて一覧を出すことすらできなくなる。
+    控えが壊れていても「フェース分は戻せない」で済ませ、シェイプ単位の
+    復元までは生かす。
+
+    >>> decode_faces('{"|a": [{"sg": "sgA", "components": ["|a.f[0]"]}]}')
+    {'|a': [{'sg': 'sgA', 'components': ['|a.f[0]']}]}
+    >>> decode_faces("")
+    {}
+    >>> decode_faces("not json")
+    {}
+    >>> decode_faces('{"|a": [{"sg": "sgA"}]}')
+    {}
+    """
+    try:
+        payload = json.loads(text or "")
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    faces = {}
+    for member, entries in payload.items():
+        if not isinstance(entries, list):
+            continue
+        kept = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            components = entry.get("components")
+            if not isinstance(components, list):
+                continue
+            components = [str(c) for c in components if c]
+            if components:
+                kept.append({"sg": str(entry.get("sg") or ""),
+                             "components": components})
+        if kept:
+            faces[str(member)] = kept
+    return faces
+
+
 def any_enabled(records):
     """1 つでも色が出ている状態か（トグルがどちら向きに倒れるかの判断）。
 
@@ -309,38 +430,86 @@ def align_originals(members, originals, fallback=""):
     return list(zip(members, originals))
 
 
-def group_by_original(records):
-    """戻し先の shadingEngine ごとに対象をまとめる。
+def _group_pairs(pairs):
+    """`(戻し先, 対象)` の組を戻し先ごとに畳む。 順序は最初に出てきた順。
 
-    一時解除も Restore も「まとめて元の SG へ戻す」操作なので、対象ごとに
-    `cmds.sets` を呼ぶと数百回の往復になる。 戻り先が同じものを 1 回の
-    呼び出しにまとめるためのグルーピング。 順序は最初に出てきた順。
+    まとめる理由は往復の回数。 対象ごとに `cmds.sets` を呼ぶと数百
+    オブジェクトで効いてくる。
+
+    >>> _group_pairs([("sgA", "a"), ("sgB", "b"), ("sgA", "c")])
+    [('sgA', ['a', 'c']), ('sgB', ['b'])]
+    """
+    groups = {}
+    order = []
+    for destination, item in pairs or []:
+        if destination not in groups:
+            groups[destination] = []
+            order.append(destination)
+        groups[destination].append(item)
+    return [(key, groups[key]) for key in order if groups[key]]
+
+
+def face_entries_for(record, member):
+    """`member` に控えてあるフェース単位の割り当て（無ければ空）。
+
+    `[{"sg": ..., "components": [...]}, ...]`。 コンポーネントを 1 つも
+    持たない項目は捨てる（書けていない＝戻せないので、当てにしない）。
+
+    >>> face_entries_for({"faces": {"a": [{"sg": "sgA", "components": ["a.f[0]"]},
+    ...                                   {"sg": "sgB", "components": []}]}}, "a")
+    [{'sg': 'sgA', 'components': ['a.f[0]']}]
+    >>> face_entries_for({}, "a")
+    []
+    """
+    faces = (record or {}).get("faces") or {}
+    return [entry for entry in faces.get(member) or []
+            if entry.get("components")]
+
+
+def restore_plan(records, default_sg=""):
+    """記録を元の割り当てへ戻す手順を `[(戻し先, [対象...]), ...]` で返す。
+
+    **2 段構えになっているのが要点。** フェース単位でマテリアルが分かれていた
+    シェイプは、まず**シェイプ全体を土台の SG へ戻してから**フェースの塊を
+    割り当て直す。 いきなりフェースだけ戻すと、どの塊にも入っていないフェースが
+    オーバーライド用の SG に残り、その SG を消した時点で割り当てを失う。
 
     メンバーごとの `originals` があればそれを使い、無ければ旧形式の
     `original`（1 件に 1 つ）で埋める。
 
-    >>> group_by_original([{"original": "sgA", "members": ["a"]},
-    ...                    {"original": "sgB", "members": ["b"]},
-    ...                    {"original": "sgA", "members": ["c"]}])
+    >>> restore_plan([{"original": "sgA", "members": ["a"]},
+    ...               {"original": "sgB", "members": ["b"]},
+    ...               {"original": "sgA", "members": ["c"]}])
     [('sgA', ['a', 'c']), ('sgB', ['b'])]
-    >>> group_by_original([{"members": ["a", "b"],
-    ...                     "originals": ["sgA", "sgB"]}])
+    >>> restore_plan([{"members": ["a", "b"], "originals": ["sgA", "sgB"]}])
     [('sgA', ['a']), ('sgB', ['b'])]
-    >>> group_by_original([{"original": "sgA", "members": []}])
+    >>> restore_plan([{"original": "sgA", "members": []}])
     []
+    >>> restore_plan([{"original": "sgA", "members": ["|a|aShape"], "faces":
+    ...     {"|a|aShape": [{"sg": "sgA", "components": ["|a|aShape.f[0:2]"]},
+    ...                    {"sg": "sgB", "components": ["|a|aShape.f[3:5]"]}]}}])
+    [('sgA', ['|a|aShape']), ('sgA', ['|a|aShape.f[0:2]']), ('sgB', ['|a|aShape.f[3:5]'])]
     """
-    groups = {}
-    order = []
+    whole = []
+    components = []
     for record in records or []:
         pairs = align_originals(record.get("members"),
                                 record.get("originals"),
-                                record.get("original") or "")
+                                record.get("original") or default_sg)
         for member, original in pairs:
-            if original not in groups:
-                groups[original] = []
-                order.append(original)
-            groups[original].append(member)
-    return [(key, groups[key]) for key in order if groups[key]]
+            entries = face_entries_for(record, member)
+            if not entries:
+                whole.append((original or default_sg, member))
+                continue
+            # 土台は「シェイプ全体に掛かっていた SG」。 それが無い
+            # （＝全面がフェース割り当てだった）なら最初の塊の SG で埋める
+            whole.append((original or entries[0].get("sg") or default_sg,
+                          member))
+            for entry in entries:
+                for component in entry.get("components") or []:
+                    components.append((entry.get("sg") or default_sg,
+                                       component))
+    return _group_pairs(whole) + _group_pairs(components)
 
 
 def index_by_object(records):

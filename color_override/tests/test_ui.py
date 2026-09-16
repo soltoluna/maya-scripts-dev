@@ -54,6 +54,14 @@ class EmptySelectionCase(unittest.TestCase):
         self.ui._CTRL.clear()
         self.ui._refresh_list()   # 例外が出なければよい
 
+    def test_refresh_with_stale_control_names_is_a_no_op(self):
+        """閉じたあとも `_CTRL` には名前が残る（`toggle()` はホットキーで走る）。"""
+        self.ui._CTRL.clear()
+        self.ui._CTRL.update({"rows": "goneRows", "backup_rows": "goneRows2",
+                              "backup_frame": "goneFrame",
+                              "count": "goneCount", "toggle": "goneToggle"})
+        self.ui._refresh_list()   # 例外が出なければよい
+
 
 class LastColorCase(unittest.TestCase):
     """前回使った色の記憶（optionVar）。"""
@@ -292,8 +300,8 @@ class SetRowCase(unittest.TestCase):
                   in _bootstrap.CALLS if name == "button"]
         self.assertEqual(labels, ["Hide", "Sel", "Restore"])
 
-    def test_a_backup_row_offers_apply(self):
-        """Restore All したあとも呼び戻せる、が成立していること。"""
+    def test_a_backup_row_offers_a_restore_button(self):
+        """控えに「戻す手段」が見えていること（Apply では復元と読めない）。"""
         self.ui._build_set_row({"name": "hair", "applied": False,
                                 "enabled": False, "records": [],
                                 "items": [{"target": "|a",
@@ -301,7 +309,7 @@ class SetRowCase(unittest.TestCase):
                                 "colors": [(1.0, 0.0, 0.0)], "count": 1})
         labels = [kwargs.get("label") for name, _a, kwargs
                   in _bootstrap.CALLS if name == "button"]
-        self.assertEqual(labels, ["Sel", "Apply"])
+        self.assertEqual(labels, ["Sel", "復元"])
 
     def test_a_disabled_row_offers_show(self):
         self.ui._build_set_row({"name": "hair", "applied": True,
@@ -310,6 +318,353 @@ class SetRowCase(unittest.TestCase):
         labels = [kwargs.get("label") for name, _a, kwargs
                   in _bootstrap.CALLS if name == "button"]
         self.assertIn("Show", labels)
+
+
+class FaceAssignmentCase(unittest.TestCase):
+    """フェース単位でマテリアルが分かれたシェイプの読み取りと復元。
+
+    スタブは割り当てを持たないので、`listConnections` / `getAttr` を
+    差し替えて実機の**接続の形**だけを再現する。 実際に色が乗るかどうかは
+    ここでは分からない（実機確認の項目として SPEC.md に残してある）。
+    """
+
+    SHAPE = "|a|aShape"
+
+    def setUp(self):
+        from maya import cmds
+        _bootstrap.reset_registry()
+        self.module = _bootstrap.reload_tool()
+        self.ui = self.module.ui
+        self.cmds = cmds
+
+    def _patch(self, name, func):
+        setattr(self.cmds, name, func)
+        self.addCleanup(lambda: delattr(self.cmds, name))
+
+    def _scene(self, connections, components=None, exists=True):
+        """割り当てを差し替える。 `connections` は `[(局所プラグ, SG プラグ)]`。"""
+        flat = [part for pair in connections for part in pair]
+        self._patch("listConnections", lambda *a, **k: list(flat))
+        table = components or {}
+
+        def _get_attr(plug, *_a, **_k):
+            if plug.endswith(".objectGrpCompList"):
+                if plug[:-len(".objectGrpCompList")] not in table:
+                    raise RuntimeError("no such attribute")
+                return list(table[plug[:-len(".objectGrpCompList")]])
+            return None
+
+        self._patch("getAttr", _get_attr)
+        self._patch("objExists", lambda *a, **k: exists)
+
+    # -- 読み取り ------------------------------------------------------------
+
+    def test_a_plain_shape_reads_as_a_single_destination(self):
+        self._scene([("aShape.instObjGroups[0]", "lambert2SG.dagSetMembers[0]")])
+        self.assertEqual(self.ui._read_assignment(self.SHAPE),
+                         ("lambert2SG", [], True))
+
+    def test_an_unassigned_shape_falls_back_to_the_maya_default(self):
+        self._scene([])
+        self.assertEqual(self.ui._read_assignment(self.SHAPE),
+                         (self.ui._DEFAULT_SG, [], True))
+
+    def test_face_groups_are_read_with_their_own_destination(self):
+        self._scene(
+            [("aShape.instObjGroups[0].objectGroups[0]", "sgA.dagSetMembers[0]"),
+             ("aShape.instObjGroups[0].objectGroups[1]", "sgB.dagSetMembers[1]")],
+            {"aShape.instObjGroups[0].objectGroups[0]": ["f[0:2]"],
+             "aShape.instObjGroups[0].objectGroups[1]": ["f[3:5]", "f[9]"]})
+        base, entries, ok = self.ui._read_assignment(self.SHAPE)
+        self.assertTrue(ok)
+        self.assertEqual(base, "sgA", "土台が無いときは最初の塊の SG で埋める")
+        self.assertEqual(entries, [
+            {"sg": "sgA", "components": ["|a|aShape.f[0:2]"]},
+            {"sg": "sgB", "components": ["|a|aShape.f[3:5]", "|a|aShape.f[9]"]}])
+
+    def test_the_pair_order_from_maya_is_not_assumed(self):
+        """向きを取り違えるとシェイプ名を SG として控えてしまう。"""
+        self._scene([("lambert2SG.dagSetMembers[0]", "aShape.instObjGroups[0]")])
+        self.assertEqual(self.ui._read_assignment(self.SHAPE),
+                         ("lambert2SG", [], True))
+
+    def test_a_connection_that_is_not_an_assignment_is_ignored(self):
+        self._scene([("aShape.message", "sgA.someAttr")])
+        self.assertEqual(self.ui._read_assignment(self.SHAPE),
+                         (self.ui._DEFAULT_SG, [], True))
+
+    def test_a_junk_component_list_is_filtered(self):
+        """変な名前を混ぜたまま戻すと `cmds.sets` が落ちる。 拾わない。"""
+        self._scene(
+            [("aShape.instObjGroups[0].objectGroups[0]", "sgA.dagSetMembers[0]")],
+            {"aShape.instObjGroups[0].objectGroups[0]":
+                [["f[0:2]"], "", None, "f[7]"]})
+        self.assertEqual(
+            self.ui._read_assignment(self.SHAPE)[1],
+            [{"sg": "sgA", "components": ["|a|aShape.f[0:2]",
+                                          "|a|aShape.f[7]"]}])
+
+    def test_an_unreadable_face_group_is_reported_as_not_readable(self):
+        """塊が読めないなら「読めた」と言わない（掛けない判断の根拠になる）。"""
+        self._scene(
+            [("aShape.instObjGroups[0].objectGroups[0]", "sgA.dagSetMembers[0]")])
+        self.assertFalse(self.ui._read_assignment(self.SHAPE)[2])
+
+    # -- 掛ける --------------------------------------------------------------
+
+    def _apply(self, node=SHAPE):
+        records, index = [], {}
+        return self.ui._apply_one(node, (1.0, 0.0, 0.0), "Set 1", records,
+                                  index, self.ui._assignment_resolver([]))
+
+    def test_a_shape_whose_faces_cannot_be_read_is_not_touched(self):
+        """**掛けた時点で元の分割が落ちる。** 読めないなら掛けない。"""
+        self._scene(
+            [("aShape.instObjGroups[0].objectGroups[0]", "sgA.dagSetMembers[0]")])
+        self.assertIsNone(self._apply())
+        self.assertTrue(_bootstrap.MESSAGES, "警告が出ていない")
+        self.assertNotIn("shadingNode",
+                         [name for name, _a, _k in _bootstrap.CALLS])
+
+    def test_the_face_groups_are_written_to_the_shader(self):
+        """復元の情報源はシーン側。 Python の辞書に持つと開き直した時点で失う。"""
+        self._scene(
+            [("aShape.instObjGroups[0].objectGroups[0]", "sgA.dagSetMembers[0]")],
+            {"aShape.instObjGroups[0].objectGroups[0]": ["f[0:2]"]})
+        self.assertIsNotNone(self._apply())
+        written = [args[1] for name, args, _k in _bootstrap.CALLS
+                   if name == "setAttr" and len(args) > 1
+                   and str(args[0]).endswith(self.ui._ATTR_FACES)]
+        self.assertEqual(len(written), 1, "フェースの控えが書かれていない")
+        self.assertEqual(core.decode_faces(written[0]),
+                         {self.SHAPE: [{"sg": "sgA",
+                                        "components": ["|a|aShape.f[0:2]"]}]})
+
+    # -- 戻す ----------------------------------------------------------------
+
+    def _force_element_calls(self):
+        return [(kwargs.get("forceElement"), args[0])
+                for name, args, kwargs in _bootstrap.CALLS
+                if name == "sets" and kwargs.get("forceElement")]
+
+    def test_restoring_puts_the_faces_back_after_the_whole_shape(self):
+        self._scene([])
+        self.ui._return_to_originals([{
+            "original": "sgBase", "members": [self.SHAPE],
+            "faces": {self.SHAPE: [
+                {"sg": "sgA", "components": ["|a|aShape.f[0:2]"]},
+                {"sg": "sgB", "components": ["|a|aShape.f[3:5]"]}]}}])
+        self.assertEqual(self._force_element_calls(),
+                         [("sgBase", [self.SHAPE]),
+                          ("sgA", ["|a|aShape.f[0:2]"]),
+                          ("sgB", ["|a|aShape.f[3:5]"])])
+
+    def test_a_component_whose_shape_is_gone_is_skipped(self):
+        """消えたノードへ戻そうとして操作ごと落ちないこと。"""
+        self._scene([], exists=False)
+        self.ui._return_to_originals([{
+            "original": "sgBase", "members": [self.SHAPE],
+            "faces": {self.SHAPE: [
+                {"sg": "sgA", "components": ["|a|aShape.f[0:2]"]}]}}])
+        self.assertEqual(self._force_element_calls(), [])
+
+
+def _set_entry(name, applied, enabled=True, count=2):
+    """一覧に流す 1 セット分の形。"""
+    return {"name": name, "applied": applied, "enabled": enabled,
+            "records": [], "items": [{"target": "|a", "color": (1.0, 0.0, 0.0)}],
+            "colors": [(1.0, 0.0, 0.0)], "count": count}
+
+
+class BackupPaneCase(unittest.TestCase):
+    """**Restore したセットは上の一覧から消え、「控え」欄に移る。**
+
+    1 つの欄に混ぜると、片付けたセットがその場に残って見えるので
+    「片付いたのか」が分からない（実機からの指摘）。
+    """
+
+    def setUp(self):
+        _bootstrap.reset_registry()
+        self.module = _bootstrap.reload_tool()
+        self.ui = self.module.ui
+        self.module.show()
+
+    def _rows_under(self, key):
+        """その欄に直接ぶら下がっている行の数。"""
+        parent = self.ui._CTRL.get(key)
+        return len([name for name, meta in _bootstrap.CONTROLS.items()
+                    if meta.get("_parent") == parent
+                    and meta.get("_command") == "rowLayout"])
+
+    def _frame(self):
+        return _bootstrap.CONTROLS[self.ui._CTRL["backup_frame"]]
+
+    def test_the_two_panes_get_their_own_rows(self):
+        self.ui._all_sets = lambda: [_set_entry("hair", True),
+                                     _set_entry("old", False),
+                                     _set_entry("older", False)]
+        self.ui._refresh_list()
+        self.assertEqual(self._rows_under("rows"), 1, "上の一覧の行数が違う")
+        self.assertEqual(self._rows_under("backup_rows"), 2,
+                         "控え欄の行数が違う")
+
+    def test_the_backup_pane_stays_reachable_when_empty(self):
+        """**空でも畳まない。** 「控えたのに 0 件」のときにこそ探しに行きたい。"""
+        self.ui._all_sets = lambda: [_set_entry("hair", True)]
+        self.ui._refresh_list()
+        self.assertIsNot(self._frame().get("manage"), False,
+                         "空の控え欄を隠すと「読み込む…」に届かない")
+        self.assertIn("backup_path", self.ui._CTRL)
+
+    def test_the_backup_pane_shows_its_count(self):
+        self.ui._all_sets = lambda: [_set_entry("old", False)]
+        self.ui._refresh_list()
+        self.assertIn("1", self._frame().get("label") or "")
+
+    def test_an_unsaved_scene_says_so_instead_of_showing_nothing(self):
+        """「0 セット」だけでは、未保存なのか空なのか分からない。"""
+        self.ui._all_sets = lambda: []
+        self.ui._refresh_list()
+        label = _bootstrap.CONTROLS[self.ui._CTRL["backup_path"]].get("label")
+        self.assertIn("未保存", label or "")
+
+    def test_rows_are_rebuilt_instead_of_accumulating(self):
+        """更新のたびに増えていかないこと。"""
+        self.ui._all_sets = lambda: [_set_entry("old", False)]
+        self.ui._refresh_list()
+        self.ui._refresh_list()
+        self.assertEqual(self._rows_under("backup_rows"), 1)
+
+    def test_a_set_that_is_applied_is_not_listed_twice(self):
+        """掛け直したセットが上と下に同時に出ないこと。"""
+        self.ui._collect_records = lambda: [
+            {"shader": "shd", "sg": "sg", "original": "sgA",
+             "originals": ["sgA"], "target": "|a", "set": "hair",
+             "color": (1.0, 0.0, 0.0), "members": ["|a|aShape"],
+             "enabled": True}]
+        self.ui._read_backup = lambda path=None: [
+            {"name": "hair", "items": [{"target": "|a",
+                                        "color": (1.0, 0.0, 0.0)}]}]
+        entries = self.ui._all_sets()
+        self.assertEqual([entry["name"] for entry in entries], ["hair"])
+        self.assertTrue(entries[0]["applied"])
+
+
+class BackupPathCase(unittest.TestCase):
+    """未保存シーンで選んでもらった控えの置き場所。
+
+    **覚えずに捨てると、書き出した控えを読み戻せない**（控えたのに
+    一覧にも出ず、復元の手段が無くなる）。
+    """
+
+    def setUp(self):
+        _bootstrap.reset_registry()
+        self.module = _bootstrap.reload_tool()
+        self.ui = self.module.ui
+
+    def test_an_unsaved_scene_falls_back_to_the_remembered_path(self):
+        from maya import cmds
+        cmds.optionVar(sv=(self.ui._OPTVAR_BACKUP_PATH, "C:/tmp/x.json"))
+        self.assertEqual(self.ui._backup_path(), "C:/tmp/x.json")
+
+    def test_choosing_a_path_remembers_it(self):
+        from maya import cmds
+        cmds.fileDialog2 = lambda *a, **k: ["C:/tmp/chosen.json"]
+        self.addCleanup(lambda: delattr(cmds, "fileDialog2"))
+        self.assertEqual(self.ui._ask_backup_path(), "C:/tmp/chosen.json")
+        self.assertEqual(_bootstrap.OPTION_VARS[self.ui._OPTVAR_BACKUP_PATH],
+                         "C:/tmp/chosen.json")
+
+    def test_cancelling_the_file_dialog_does_not_remember_anything(self):
+        from maya import cmds
+        cmds.fileDialog2 = lambda *a, **k: []
+        self.addCleanup(lambda: delattr(cmds, "fileDialog2"))
+        self.assertFalse(self.ui._ask_backup_path())
+        self.assertNotIn(self.ui._OPTVAR_BACKUP_PATH, _bootstrap.OPTION_VARS)
+
+    def test_the_option_var_is_namespaced(self):
+        self.assertTrue(
+            self.ui._OPTVAR_BACKUP_PATH.startswith(self.module.NAMESPACE + "_"))
+
+
+class BackupChooserCase(unittest.TestCase):
+    """**読み込む控えを選べること。**
+
+    既定（シーンの隣）だけでは届かない場面がある — 未保存シーンで自分で
+    置いた控え、別名保存で置いてきた前のシーンの控え、共有フォルダの控え。
+    """
+
+    def setUp(self):
+        import tempfile
+        _bootstrap.reset_registry()
+        self.module = _bootstrap.reload_tool()
+        self.ui = self.module.ui
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _write(self, name, sets):
+        path = os.path.join(self.tmp.name, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(core.catalog_to_text(sets))
+        return path
+
+    def _dialog_returns(self, value):
+        from maya import cmds
+        cmds.fileDialog2 = lambda *a, **k: value
+        self.addCleanup(lambda: delattr(cmds, "fileDialog2"))
+
+    def test_the_scene_neighbour_is_the_default(self):
+        self.ui._scene_path = lambda: "C:/work/shot010.ma"
+        self.assertEqual(self.ui._backup_path(),
+                         "C:/work/shot010.color_override.json")
+
+    def test_a_chosen_backup_wins_over_the_scene_neighbour(self):
+        """選んだのに既定を見続けると、選べた意味が無い。"""
+        from maya import cmds
+        self.ui._scene_path = lambda: "C:/work/shot010.ma"
+        cmds.optionVar(sv=(self.ui._OPTVAR_BACKUP_PATH, "D:/shared/team.json"))
+        self.assertEqual(self.ui._backup_path(), "D:/shared/team.json")
+
+    def test_choosing_a_backup_with_sets_switches_to_it(self):
+        path = self._write("team.json",
+                           [{"name": "hair",
+                             "items": [{"target": "|a",
+                                        "color": (1.0, 0.0, 0.0)}]}])
+        self._dialog_returns([path])
+        self.ui._on_choose_backup()
+        self.assertEqual(self.ui._backup_path(), path)
+
+    def test_an_empty_backup_is_not_switched_to(self):
+        """切り替えてから空だと、それまで見えていた控えまで見失う。"""
+        path = self._write("empty.json", [])
+        self._dialog_returns([path])
+        self.ui._on_choose_backup()
+        self.assertIsNone(self.ui._chosen_backup_path())
+        self.assertTrue(_bootstrap.MESSAGES, "警告が出ていない")
+
+    def test_a_broken_file_is_not_switched_to(self):
+        path = os.path.join(self.tmp.name, "broken.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("{ not json")
+        self._dialog_returns([path])
+        self.ui._on_choose_backup()
+        self.assertIsNone(self.ui._chosen_backup_path())
+
+    def test_cancelling_keeps_the_current_backup(self):
+        from maya import cmds
+        cmds.optionVar(sv=(self.ui._OPTVAR_BACKUP_PATH, "D:/shared/team.json"))
+        self._dialog_returns([])
+        self.ui._on_choose_backup()
+        self.assertEqual(self.ui._backup_path(), "D:/shared/team.json")
+
+    def test_reset_goes_back_to_the_scene_neighbour(self):
+        from maya import cmds
+        self.ui._scene_path = lambda: "C:/work/shot010.ma"
+        cmds.optionVar(sv=(self.ui._OPTVAR_BACKUP_PATH, "D:/shared/team.json"))
+        self.ui._on_reset_backup()
+        self.assertIsNone(self.ui._chosen_backup_path())
+        self.assertEqual(self.ui._backup_path(),
+                         "C:/work/shot010.color_override.json")
 
 
 if __name__ == "__main__":

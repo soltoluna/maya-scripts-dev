@@ -199,9 +199,9 @@ class PeekCase(unittest.TestCase):
         self.assertFalse(core.any_enabled([]))
         self.assertFalse(core.any_enabled(None))
 
-    def test_group_by_original_merges_the_same_destination(self):
+    def test_restore_plan_merges_the_same_destination(self):
         """戻し先が同じものが 1 回の cmds.sets にまとまること。"""
-        grouped = core.group_by_original([
+        grouped = core.restore_plan([
             {"original": "sgA", "members": ["a1", "a2"]},
             {"original": "sgB", "members": ["b1"]},
             {"original": "sgA", "members": ["a3"]},
@@ -209,10 +209,10 @@ class PeekCase(unittest.TestCase):
         self.assertEqual(grouped, [("sgA", ["a1", "a2", "a3"]),
                                    ("sgB", ["b1"])])
 
-    def test_group_by_original_skips_empty_groups(self):
-        self.assertEqual(core.group_by_original([{"original": "sgA"}]), [])
-        self.assertEqual(core.group_by_original([]), [])
-        self.assertEqual(core.group_by_original(None), [])
+    def test_restore_plan_skips_empty_groups(self):
+        self.assertEqual(core.restore_plan([{"original": "sgA"}]), [])
+        self.assertEqual(core.restore_plan([]), [])
+        self.assertEqual(core.restore_plan(None), [])
 
     def test_index_finds_a_record_by_every_name(self):
         record = {"target": "|grp|body", "members": ["|grp|body|bodyShape"]}
@@ -259,7 +259,7 @@ class PeekCase(unittest.TestCase):
 
     def test_group_splits_a_record_across_destinations(self):
         """1 件の記録の中でも戻し先が違えば分かれること（グループ対応の核心）。"""
-        grouped = core.group_by_original([
+        grouped = core.restore_plan([
             {"members": ["hair1", "hair2", "skin1"],
              "originals": ["sgHair", "sgHair", "sgSkin"]},
         ])
@@ -267,8 +267,8 @@ class PeekCase(unittest.TestCase):
                                    ("sgSkin", ["skin1"])])
 
     def test_group_still_handles_the_old_single_original(self):
-        grouped = core.group_by_original([{"original": "sgA",
-                                           "members": ["a", "b"]}])
+        grouped = core.restore_plan([{"original": "sgA",
+                                      "members": ["a", "b"]}])
         self.assertEqual(grouped, [("sgA", ["a", "b"])])
 
     def test_match_finds_a_group_record_from_a_child_shape(self):
@@ -422,6 +422,84 @@ class CatalogCase(unittest.TestCase):
     def test_backup_path_needs_a_saved_scene(self):
         self.assertIsNone(core.backup_path_for(""))
         self.assertIsNone(core.backup_path_for(None))
+
+
+class FaceAssignmentCase(unittest.TestCase):
+    """フェース単位でマテリアルが分かれたシェイプの戻し先。
+
+    **ここが今回の要。** シェイプ全体を 1 色で塗る前にフェースの塊を控え、
+    戻すときに分割ごと復元する。 控えを失うと元の割り当ては二度と戻らない。
+    """
+
+    def test_splits_a_component_name(self):
+        self.assertEqual(core.split_component("|grp|a|aShape.f[0:2]"),
+                         ("|grp|a|aShape", "f[0:2]"))
+        self.assertEqual(core.split_component("|grp|a|aShape"),
+                         ("|grp|a|aShape", ""))
+
+    def test_a_namespace_is_not_mistaken_for_a_component(self):
+        """`:` を含む名前を壊さないこと（リファレンスされたモデルで必ず出る）。"""
+        self.assertEqual(core.component_owner("|char:body|char:bodyShape"),
+                         "|char:body|char:bodyShape")
+        self.assertFalse(core.is_component("char:bodyShape"))
+
+    def test_faces_round_trip_through_a_string_attribute(self):
+        faces = {"|a|aShape": [{"sg": "sgA", "components": ["|a|aShape.f[0:2]"]},
+                               {"sg": "sgB", "components": ["|a|aShape.f[3]"]}]}
+        self.assertEqual(core.decode_faces(core.encode_faces(faces)), faces)
+
+    def test_nothing_to_record_writes_an_empty_attribute(self):
+        self.assertEqual(core.encode_faces({}), "")
+        self.assertEqual(core.encode_faces(None), "")
+
+    def test_a_broken_record_is_dropped_instead_of_raising(self):
+        """手で属性を壊されてもシーンを開けなくならないこと。"""
+        self.assertEqual(core.decode_faces("{ not json"), {})
+        self.assertEqual(core.decode_faces('{"|a": "sgA"}'), {})
+        self.assertEqual(core.decode_faces('{"|a": [{"sg": "sgA"}]}'), {})
+
+    def test_the_whole_shape_is_restored_before_its_faces(self):
+        """順序が逆だと、どの塊にも入らないフェースが取り残される。"""
+        plan = core.restore_plan([{
+            "original": "sgBase", "members": ["|a|aShape"],
+            "faces": {"|a|aShape": [
+                {"sg": "sgA", "components": ["|a|aShape.f[0:2]"]},
+                {"sg": "sgB", "components": ["|a|aShape.f[3:5]"]}]}}])
+        self.assertEqual(plan, [("sgBase", ["|a|aShape"]),
+                                ("sgA", ["|a|aShape.f[0:2]"]),
+                                ("sgB", ["|a|aShape.f[3:5]"])])
+
+    def test_a_fully_face_assigned_shape_falls_back_to_the_first_group(self):
+        """全面がフェース割り当てなら、土台は最初の塊の SG で埋める。"""
+        plan = core.restore_plan([{
+            "members": ["|a|aShape"], "originals": [""],
+            "faces": {"|a|aShape": [
+                {"sg": "sgA", "components": ["|a|aShape.f[0:2]"]}]}}])
+        self.assertEqual(plan[0], ("sgA", ["|a|aShape"]))
+
+    def test_plain_shapes_in_the_same_batch_still_group_together(self):
+        """フェース持ちが混ざっても、ふつうのシェイプはまとめて 1 回で戻す。"""
+        plan = core.restore_plan([
+            {"original": "sgA", "members": ["p1", "p2"]},
+            {"original": "sgA", "members": ["|a|aShape"],
+             "faces": {"|a|aShape": [
+                 {"sg": "sgB", "components": ["|a|aShape.f[0]"]}]}}])
+        self.assertEqual(plan[0], ("sgA", ["p1", "p2", "|a|aShape"]))
+        self.assertEqual(plan[1], ("sgB", ["|a|aShape.f[0]"]))
+
+    def test_an_entry_without_components_is_ignored(self):
+        """書けていない控えを当てにしない（戻せないものは無いのと同じ）。"""
+        record = {"original": "sgA", "members": ["|a|aShape"],
+                  "faces": {"|a|aShape": [{"sg": "sgB", "components": []}]}}
+        self.assertEqual(core.face_entries_for(record, "|a|aShape"), [])
+        self.assertEqual(core.restore_plan([record]),
+                         [("sgA", ["|a|aShape"])])
+
+    def test_records_without_faces_behave_exactly_as_before(self):
+        """v0.4.0 までのシーンを開いても挙動が変わらないこと。"""
+        self.assertEqual(
+            core.restore_plan([{"original": "sgA", "members": ["a", "b"]}]),
+            [("sgA", ["a", "b"])])
 
 
 if __name__ == "__main__":

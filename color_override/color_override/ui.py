@@ -16,11 +16,18 @@
       .ntkColorOverrideTarget         掛けた時点の対象ノード名（表示用）
       .ntkColorOverrideMembers        掛けた相手（シェイプ）
       .ntkColorOverrideOriginals      **それぞれの戻し先** ← 復元の情報源
+      .ntkColorOverrideFaces          **フェース単位の戻し先**（JSON・下記）
       .ntkColorOverrideSet            所属するセット名 ← 一覧を畳む単位
     ntk_color_override_<対象名>_SG    上をつないだ shadingEngine
 
 **戻し先はメンバーごとに持つ。** グループノードに掛けると中のシェイプは
 別々のマテリアルを持ちうるので、1 件につき 1 つでは戻せない。
+
+**さらにシェイプ 1 つの中がフェース単位で分かれていることもある。**
+色を掛けるときはシェイプ全体を 1 色で塗る（そこは変えない）が、
+**掛ける前にフェースの塊と戻し先を控えておき、Restore と Hide で
+元の分割ごと戻す**。 控えられなかったシェイプには**掛けない**
+（静かに割り当てを失うより、掛からないほうがよい）。
 
 `surfaceShader` を使うのはライティングに影響されないフラットな色になるため。
 陰影が乗らないぶん、同系色のオブジェクトの境界（＝貫通している箇所）が
@@ -65,6 +72,11 @@ WINDOW = _NS + "Win"
 
 _OPTVAR_LAST_COLOR = _NS + "_last_color"         # ntk_color_override_last_color
 
+# **いま見ている控えのパス。** 既定はシーンの隣だが、別の控え（前のシーンの
+# もの・共有フォルダに置いたもの・未保存シーンで自分で選んだ場所）を開けるよう
+# にしてある。 覚えずに捨てると、書き出した控えを二度と読めず復元できない
+_OPTVAR_BACKUP_PATH = _NS + "_backup_path"
+
 # シーンに作るノードにも名前空間を付ける。 実機のシーンには他の人が作った
 # ノードも同居するため
 _NODE_PREFIX = _NS
@@ -80,6 +92,16 @@ _ATTR_MEMBERS = NAMESPACE + "ColorOverrideMembers"
 # メンバーと 1 対 1 で対応する戻し先。 グループに掛けると中のシェイプは
 # 別々のマテリアルを持ちうるので、_ATTR_ORIGINAL の 1 つでは戻せない
 _ATTR_ORIGINALS = NAMESPACE + "ColorOverrideOriginals"
+
+# フェース単位で分かれていたシェイプの戻し先（JSON）。 `;` 区切りでは
+# 入れ子（SG ごとのフェースの塊）を表せないのでここだけ形が違う
+_ATTR_FACES = NAMESPACE + "ColorOverrideFaces"
+
+# シェイプから SG への割り当ては instObjGroups を経由する。 フェース単位なら
+# さらに objectGroups[n] が挟まる。 **接続プラグの形が判別そのもの**で、
+# SG のメンバーを引かずに済むのはこのおかげ
+_MEMBER_PLUG = ".instObjGroups"
+_FACE_PLUG = ".objectGroups["
 
 # 所属セット名。 一覧を畳む単位で、これが無い記録（v0.3.0 以前）は Unnamed へ
 _ATTR_SET = NAMESPACE + "ColorOverrideSet"
@@ -124,10 +146,82 @@ def _shapes_of(node):
     return shapes or [node]
 
 
-def _shading_engine_of(shape):
-    """シェイプに割り当たっている shadingEngine（最初の 1 つ）。"""
-    found = cmds.listConnections(shape, type="shadingEngine") or []
-    return found[0] if found else _DEFAULT_SG
+def _listed(value):
+    """`cmds` の戻りを必ず一覧にする（1 件のとき文字列が返る場合がある）。"""
+    if not value:
+        return []
+    return list(value) if isinstance(value, (list, tuple)) else [value]
+
+
+def _component_list(plug, shape):
+    """`objectGroups[n]` プラグが抱えるフェースの塊をフルパスで返す。
+
+    `objectGrpCompList` は `['f[0:2]', 'f[7]']` のような形で返る。 SG の
+    メンバー（`cmds.sets(sg, q=True)`）を舐めるより安く、しかも
+    **どの SG のどのフェースか**が接続から直接たどれる。
+
+    **`f[...]` の形をしていないものは捨てる。** ここで拾い損ねると
+    「読めなかった」扱いになって色が掛からないだけだが、変な名前を混ぜると
+    戻すときの `cmds.sets` が落ちる。 掛からないほうがまだよい。
+    """
+    try:
+        value = cmds.getAttr(plug + ".objectGrpCompList")
+    except Exception:
+        return []
+
+    items = []
+    for item in _listed(value):
+        # 実機の戻りが入れ子だった場合に備えて 1 段だけほどく
+        items.extend(_listed(item) if isinstance(item, (list, tuple))
+                     else [item])
+    return ["%s.%s" % (shape, item) for item in items
+            if isinstance(item, str) and "[" in item]
+
+
+def _read_assignment(shape):
+    """シェイプの現在の割り当てを `(戻し先, フェースの塊, 読めたか)` で返す。
+
+    **フェース単位（マルチマテリアル）かどうかは接続プラグの形で分かる。**
+    ふつうのシェイプは `instObjGroups[0]` が直接 SG につながるので、
+    セットの中身を引かずに済む（大きいシーンの `initialShadingGroup` を
+    舐めない）。
+
+    「読めたか」が False なのは、フェース単位で割り当たっているのに塊を
+    読み出せなかったとき。 **この場合は色を掛けない。** 掛けてしまうと
+    `forceElement` が元の分割を落とし、戻す手掛かりがどこにも残らない。
+    """
+    pairs = _listed(cmds.listConnections(shape, type="shadingEngine",
+                                         connections=True, plugs=True))
+    wholes = []
+    entries = []
+    unreadable = False
+    for index in range(0, len(pairs) - 1, 2):
+        local, remote = pairs[index], pairs[index + 1]
+        # **向きを当てにしない。** シェイプ側のプラグは必ず instObjGroups を
+        # 通るので、そちらで見分ける。 取り違えるとシェイプ名を SG として
+        # 控えてしまい、戻すときに存在しない SG を指す
+        if _MEMBER_PLUG not in (local or ""):
+            if _MEMBER_PLUG in (remote or ""):
+                local, remote = remote, local
+            else:
+                continue
+        engine = (remote or "").split(".", 1)[0]
+        if not engine:
+            continue
+        if _FACE_PLUG not in (local or ""):
+            wholes.append(engine)
+            continue
+        components = _component_list(local, shape)
+        if components:
+            entries.append({"sg": engine, "components": components})
+        else:
+            unreadable = True
+
+    if not entries:
+        return (wholes[0] if wholes else _DEFAULT_SG, [], not unreadable)
+    # 土台はシェイプ全体に掛かっていた SG。 全面がフェース割り当てなら
+    # 最初の塊の SG で埋める（どの塊にも入らないフェースの行き先になる）
+    return (wholes[0] if wholes else entries[0]["sg"], entries, not unreadable)
 
 
 def _is_override_shader(shader):
@@ -181,6 +275,8 @@ def _collect_records():
             "sg": shading_engines[0] if shading_engines else None,
             "original": legacy,
             "originals": [known.get(name, legacy) for name in live],
+            # フェース単位で分かれていたシェイプの戻し先（無ければ空）
+            "faces": core.decode_faces(_read_attr(shader, _ATTR_FACES)),
             "target": (_read_attr(shader, _ATTR_TARGET)
                        or (live[0] if live else shader)),
             "set": _read_attr(shader, _ATTR_SET),
@@ -231,9 +327,29 @@ def _scene_path():
         return ""
 
 
-def _backup_path():
-    """いま開いているシーンに対応する控えのパス（未保存なら None）。"""
+def _chosen_backup_path():
+    """ユーザーが明示的に選んだ控え（選んでいなければ None）。"""
+    if not cmds.optionVar(exists=_OPTVAR_BACKUP_PATH):
+        return None
+    return cmds.optionVar(q=_OPTVAR_BACKUP_PATH) or None
+
+
+def _default_backup_path():
+    """シーンの隣（＝既定の置き場所）。 シーンが未保存なら None。"""
     return core.backup_path_for(_scene_path(), _BACKUP_SUFFIX)
+
+
+def _backup_path():
+    """いま見ている控えのパス（無ければ None）。
+
+    **明示的に選んだものが最優先。** 既定はシーンの隣だが、
+
+      * シーンが未保存だと置き場所が決まらない（選ばせるしかない）
+      * 前のシーンの控えや、共有フォルダに置いた控えを開きたいことがある
+
+    ので、選ばれていればそちらを見る。 選択は `既定に戻す` で解除できる。
+    """
+    return _chosen_backup_path() or _default_backup_path()
 
 
 def _read_backup(path=None):
@@ -279,7 +395,11 @@ def _ask_backup_path():
         return False
     chosen = cmds.fileDialog2(fileFilter="JSON (*.json)", dialogStyle=2,
                               fileMode=0, caption="色分けの控えを保存") or []
-    return chosen[0] if chosen else False
+    if not chosen:
+        return False
+    # 次に読むときも同じ場所を見る（覚えないと一覧から消える）
+    _remember_backup_path(chosen[0])
+    return chosen[0]
 
 
 def _backup_sets(sets):
@@ -312,6 +432,14 @@ def _backup_sets(sets):
         return False
 
 
+def _remember_backup_path(path):
+    """以降この控えを見る（`None` で選択を解除し、シーンの隣へ戻す）。"""
+    if path:
+        cmds.optionVar(sv=(_OPTVAR_BACKUP_PATH, path))
+    elif cmds.optionVar(exists=_OPTVAR_BACKUP_PATH):
+        cmds.optionVar(remove=_OPTVAR_BACKUP_PATH)
+
+
 def _forget_backup(name):
     """控えから 1 セット消す。"""
     path = _backup_path()
@@ -330,10 +458,14 @@ def _forget_backup(name):
 # --------------------------------------------------------------------------- #
 
 def _all_sets():
-    """一覧に出すもの — **掛かっているセット + 控えに残っているセット**。
+    """扱うセット全部 — **掛かっているセット + 控えだけのセット**。
 
-    Restore したセットが控えの行として残り続けるので、後から Apply で
-    呼び戻せる。 これが「Restore All した後でも元に戻せる」の実体。
+    一覧では 2 つに分けて出す（`applied` が上、そうでないものが「控え」欄）。
+    **同じ名前が掛かっていれば控えの側は出さない。** 同じものが 2 行に
+    見えるのを避けるため。
+
+    作るのを 1 本にまとめてあるのは、新しいセット名の採番（`new_set_name`）が
+    掛かっている名前と控えの名前の**両方**と衝突してはいけないため。
     """
     applied = core.group_by_set(_collect_records())
     known = {entry["name"] for entry in applied}
@@ -372,17 +504,23 @@ def _write_string(node, attr, value):
     cmds.setAttr("%s.%s" % (node, attr), value or "", type="string")
 
 
-def _write_assignment(shader, members, originals):
+def _write_assignment(shader, members, originals, faces=None):
     """「誰に掛けたか」と「それぞれの戻し先」をシェーダーに控える。
 
     復元の情報源はシーンに置く。 Python の辞書に持つとシーンを開き直した
     時点で戻せなくなり、一時解除中は shadingEngine が空なので
     シーンからも読めなくなる。
+
+    `faces` はフェース単位で分かれていたシェイプの戻し先。 いま抱えている
+    メンバーの分だけを書く（外したシェイプの控えを持ち回らない）。
     """
     if not shader or not cmds.objExists(shader):
         return
+    kept = {name: entries for name, entries in (faces or {}).items()
+            if name in set(members or [])}
     _write_string(shader, _ATTR_MEMBERS, core.join_members(members))
     _write_string(shader, _ATTR_ORIGINALS, core.join_members(originals))
+    _write_string(shader, _ATTR_FACES, core.encode_faces(kept))
 
 
 def _delete_override(record):
@@ -392,24 +530,32 @@ def _delete_override(record):
             cmds.delete(node)
 
 
-def _original_resolver(records):
-    """シェイプ → **本当の**元 shadingEngine を返す関数を作る。
+def _assignment_resolver(records):
+    """シェイプ → **本当の**元の割り当て `(戻し先, フェースの塊, 読めたか)`。
 
     既にオーバーライドが掛かっているシェイプは、現在の割り当てが
     オーバーライド用の SG なので、そのまま控えると二度と元に戻せない。
-    記録に控えてある元の SG を優先する。
+    記録に控えてある分を優先する。
+
+    シーンから読んだ分は控えておく。 同じシェイプが 2 回出てきても
+    `listConnections` と `getAttr` を往復しない。
     """
     known = {}
     for record in records or []:
         for member, original in core.align_originals(
                 record.get("members"), record.get("originals"),
                 record.get("original") or _DEFAULT_SG):
-            known[member] = original
+            known[member] = (original, core.face_entries_for(record, member),
+                             True)
+
+    cache = {}
 
     def _resolve(shape):
         if shape in known:
             return known[shape]
-        return _shading_engine_of(shape)
+        if shape not in cache:
+            cache[shape] = _read_assignment(shape)
+        return cache[shape]
 
     return _resolve
 
@@ -438,11 +584,17 @@ def _release_members(records, index, shapes):
                 if index.get(key) is record:
                     index.pop(key, None)
 
+        faces = {name: entries
+                 for name, entries in (record.get("faces") or {}).items()
+                 if name not in claimed}
+
         record["members"] = keep
         record["originals"] = [pairs[name] for name in keep]
+        record["faces"] = faces
 
         if keep:
-            _write_assignment(record["shader"], keep, record["originals"])
+            _write_assignment(record["shader"], keep, record["originals"],
+                              faces)
             continue
 
         _delete_override(record)
@@ -451,7 +603,7 @@ def _release_members(records, index, shapes):
             index.pop(key, None)
 
 
-def _apply_one(node, rgb, set_name, records, index, resolve_original):
+def _apply_one(node, rgb, set_name, records, index, resolve_assignment):
     """ノード 1 つに色を掛ける。 既に掛かっていれば色とセットを差し替える。
 
     `index` は `core.index_by_object()` が作った「対象名 → 記録」の索引。
@@ -461,6 +613,11 @@ def _apply_one(node, rgb, set_name, records, index, resolve_original):
 
     グループノードを渡すと、**中のシェイプを全部拾って 1 件の記録にまとめる**。
     戻し先はシェイプごとに控えるので、中身のマテリアルがばらばらでも戻せる。
+
+    **フェース単位の割り当てを読み取れないシェイプが 1 つでもあれば、その
+    ノードには掛けずに `None` を返す。** 掛けた時点で元の分割が落ち、戻す
+    手掛かりがどこにも残らないため（グループなら中の 1 つでも駄目なら止める。
+    半分だけ掛かっているほうが分かりにくい）。
     """
     record = index.get(node) or index.get(core.short_name(node))
 
@@ -484,7 +641,21 @@ def _apply_one(node, rgb, set_name, records, index, resolve_original):
         return None
 
     # **割り当てを書き換える前に、シェイプごとの戻し先を控える。**
-    originals = [resolve_original(shape) for shape in shapes]
+    assignments = [resolve_assignment(shape) for shape in shapes]
+
+    # 読み取れないフェース割り当てがあれば掛けない（A: 静かに壊さない）
+    blocked = [shape for shape, item in zip(shapes, assignments) if not item[2]]
+    if blocked:
+        cmds.warning(
+            "[%s] %s: フェース単位の割り当てを読み取れないシェイプが %d 個あるため"
+            "掛けませんでした（戻せなくなるため）。 例: %s"
+            % (_PACKAGE, core.short_name(node), len(blocked),
+               core.short_name(blocked[0])))
+        return None
+
+    originals = [item[0] for item in assignments]
+    faces = {shape: item[1]
+             for shape, item in zip(shapes, assignments) if item[1]}
 
     # これから抱えるシェイプを既存の記録から外す（1 シェイプ = 1 記録）
     _release_members(records, index, shapes)
@@ -504,12 +675,12 @@ def _apply_one(node, rgb, set_name, records, index, resolve_original):
 
     cmds.setAttr(shader + ".outColor", rgb[0], rgb[1], rgb[2], type="double3")
     cmds.sets(shapes, edit=True, forceElement=shading_engine)
-    _write_assignment(shader, shapes, originals)
+    _write_assignment(shader, shapes, originals, faces)
 
     # 同じ処理の中で続けて引けるよう、作ったものも索引に足しておく
     record = {"shader": shader, "sg": shading_engine, "original": originals[0],
-              "originals": originals, "target": node, "members": shapes,
-              "set": set_name, "enabled": True}
+              "originals": originals, "faces": faces, "target": node,
+              "members": shapes, "set": set_name, "enabled": True}
     records.append(record)
     for name in [node] + shapes:
         index.setdefault(name, record)
@@ -549,7 +720,7 @@ def _disable_records(records):
     # シーンからは「何に掛かっていたか」が読めなくなる
     for record in targets:
         _write_assignment(record.get("shader"), record.get("members"),
-                          record.get("originals"))
+                          record.get("originals"), record.get("faces"))
 
     _return_to_originals(targets)
     return len(targets)
@@ -558,13 +729,20 @@ def _disable_records(records):
 def _return_to_originals(records):
     """記録のメンバーを、**それぞれの**元の shadingEngine へ戻す。
 
-    戻し先が同じものは 1 回の `cmds.sets` にまとめる（`core.group_by_original`）。
-    対象ごとに呼ぶと数百オブジェクトで往復が効いてくる。
+    手順は `core.restore_plan`。 戻し先が同じものは 1 回の `cmds.sets` に
+    まとめる（対象ごとに呼ぶと数百オブジェクトで往復が効いてくる）。
+
+    **フェース単位で分かれていたシェイプは 2 段階で戻す。** 先にシェイプ全体を
+    土台の SG へ戻し、そのあとフェースの塊を割り当て直す。 順序が逆だと、
+    どの塊にも入っていないフェースがオーバーライド用の SG に残る。
 
     元のマテリアルが既に消えていたら Maya の既定へ逃がす。
     """
-    for original, members in core.group_by_original(records):
-        existing = [name for name in members if cmds.objExists(name)]
+    for original, items in core.restore_plan(records, _DEFAULT_SG):
+        # コンポーネントは持ち主のシェイプの有無で見る（`objExists` に
+        # `pCubeShape1.f[0:2]` を渡したときの挙動に寄りかからない）
+        existing = [name for name in items
+                    if cmds.objExists(core.component_owner(name))]
         if not existing:
             continue
         destination = (original if original and cmds.objExists(original)
@@ -634,18 +812,26 @@ def _apply_pairs(pairs, label, set_name=None):
     # 割り当てを辿ると、対象が増えたときに cmds の往復が効いてくる
     records = _collect_records()
     index = core.index_by_object(records)
-    resolve_original = _original_resolver(records)
+    resolve_assignment = _assignment_resolver(records)
 
     name = (core.normalize_set_name(set_name) if set_name
             else core.new_set_name([entry["name"] for entry in _all_sets()]))
 
+    # 掛からなかったものは黙って落とさない。 数が合わないまま進むと、
+    # 「塗ったつもりのオブジェクトが素のまま」に気付けない
+    skipped = []
+
     def _run():
         for node, rgb in pairs:
-            _apply_one(node, rgb, name, records, index, resolve_original)
+            if _apply_one(node, rgb, name, records, index,
+                          resolve_assignment) is None:
+                skipped.append(node)
 
     _in_undo_chunk(label, _run)
     _refresh_list()
-    print("[%s] %s: %d object(s) -> %s" % (_PACKAGE, label, len(pairs), name))
+    print("[%s] %s: %d object(s) -> %s%s"
+          % (_PACKAGE, label, len(pairs) - len(skipped), name,
+             ("  skipped: %d" % (len(skipped),)) if skipped else ""))
     return name
 
 
@@ -894,12 +1080,18 @@ def _build_swatches(colors):
 
 
 def _build_set_row(entry):
-    """一覧の 1 行 = 1 セット。"""
+    """一覧の 1 行 = 1 セット。 掛かっているものと控えで持たせる操作が違う。"""
     name = entry["name"]
-    cmds.rowLayout(numberOfColumns=6, adjustableColumn=2,
-                   columnWidth6=(98, 110, 50, 46, 40, 62),
-                   columnAlign6=("left", "left", "left",
-                                 "center", "center", "center"))
+    if entry["applied"]:
+        cmds.rowLayout(numberOfColumns=6, adjustableColumn=2,
+                       columnWidth6=(98, 110, 50, 46, 40, 62),
+                       columnAlign6=("left", "left", "left",
+                                     "center", "center", "center"))
+    else:
+        cmds.rowLayout(numberOfColumns=5, adjustableColumn=2,
+                       columnWidth5=(98, 110, 50, 40, 62),
+                       columnAlign5=("left", "left", "left",
+                                     "center", "center"))
 
     _build_swatches(entry["colors"])
 
@@ -930,42 +1122,89 @@ def _build_set_row(entry):
                     ann="元のマテリアルに戻してノードを片付ける\n"
                         "（控えに残るので後から掛け直せる）")
     else:
-        cmds.text(label="控え", align="center", fn="smallObliqueLabelFont",
-                  ann="シーンには掛かっていない。 控えにだけ残っている")
         cmds.button(label="Sel", height=22,
                     c=lambda *a, n=name: _on_set_select(n),
                     ann="このセットのオブジェクトをシーンで選択する")
-        cmds.button(label="Apply", height=22,
+        cmds.button(label="復元", height=22,
                     c=lambda *a, n=name: _on_set_reapply(n),
-                    ann="控えから同じ色分けを掛け直す")
+                    ann=("控えの色分けをシーンに掛け直す\n"
+                         "（上の一覧に戻る）"))
 
     cmds.setParent("..")
 
 
-def _refresh_list(*_args):
-    """一覧を作り直す。 **セット単位**で、色見本付きで並べる。"""
-    parent = _CTRL.get("rows")
+def _fill_rows(parent, entries, empty_label):
+    """欄の中身を丸ごと作り直す。 差分更新はしない（実態と食い違わせない）。"""
     if not parent or not cmds.columnLayout(parent, exists=True):
         return
-
     for child in cmds.columnLayout(parent, q=True, childArray=True) or []:
         cmds.deleteUI(child)
     cmds.setParent(parent)
 
-    entries = _all_sets()
     for entry in entries:
         _build_set_row(entry)
     if not entries:
-        cmds.text(label="   まだ何も掛かっていません",
-                  align="left", fn="smallObliqueLabelFont")
+        cmds.text(label=empty_label, align="left", fn="smallObliqueLabelFont")
 
+
+def _refresh_backup_path():
+    """**いまどの控えを見ているか**を控え欄に出す。
+
+    ここが見えないと、「保存したのに 0 セット」のときに何を疑えばよいか
+    分からない（シーンが未保存なのか、別の控えを見ているのか）。
+    """
+    ctrl = _CTRL.get("backup_path")
+    if not ctrl or not cmds.text(ctrl, exists=True):
+        return
+
+    chosen = _chosen_backup_path()
+    path = _backup_path()
+    if not path:
+        label = "シーンが未保存です（「読み込む…」で控えを選べます）"
+    else:
+        label = os.path.basename(path)
+        if chosen:
+            label += "   ＊選択中"
+        elif not os.path.isfile(path):
+            label += "   （まだありません）"
+
+    cmds.text(ctrl, edit=True, label=label, ann=path or "")
+    if _CTRL.get("backup_reset"):
+        cmds.button(_CTRL["backup_reset"], edit=True, enable=bool(chosen))
+
+
+def _refresh_list(*_args):
+    """一覧を作り直す。 **上は掛かっているセット、下は控え**。
+
+    分けているのは「片付いたことが見て分かる」ため。 1 つの欄に混ぜると、
+    `Restore` したセットがその場に残って見え、片付いたのかどうか分からない。
+    """
+    # **ウィンドウを閉じたあとも `_CTRL` には名前が残る。** `toggle()` は
+    # ホットキーから呼べるので、ここを通らない経路が実際にある。 消えた
+    # コントロールを edit すると Maya 側で例外になる
+    parent = _CTRL.get("rows")
+    if not parent or not cmds.columnLayout(parent, exists=True):
+        return
+
+    entries = _all_sets()
     applied = [entry for entry in entries if entry["applied"]]
+    backups = [entry for entry in entries if not entry["applied"]]
+
+    _fill_rows(parent, applied, "   まだ何も掛かっていません")
+    _fill_rows(_CTRL.get("backup_rows"), backups, "   控えはまだありません")
+
+    frame = _CTRL.get("backup_frame")
+    if frame and cmds.frameLayout(frame, exists=True):
+        cmds.frameLayout(frame, edit=True,
+                         label="控え  —  %d セット" % (len(backups),))
+    _refresh_backup_path()
+
     showing = any(entry["enabled"] for entry in applied) if applied else True
 
     if _CTRL.get("count"):
         cmds.text(_CTRL["count"], edit=True,
                   label="Sets: %d applied / %d backup%s"
-                        % (len(applied), len(entries) - len(applied),
+                        % (len(applied), len(backups),
                            "" if showing else "   — 一時解除中"))
 
     # トグルのラベルは**シーンの実態から**決める。 別にフラグを持つと、
@@ -995,6 +1234,50 @@ def _on_hex_changed(*_args):
                        text=core.to_hex(_current_color()))
         return
     _set_color(rgb)
+
+
+def _on_choose_backup(*_args):
+    """**読み込む控えを選ぶ。**
+
+    既定はシーンの隣だが、それだけでは届かない場面がある:
+
+      * シーンが未保存で、控えを自分で選んだ場所に置いた
+      * 前のシーンの控え（別名保存で置いてきたもの）を呼び戻したい
+      * 共有フォルダに置いた色分けを他の人と使い回したい
+
+    **読めなかった控えには切り替えない。** 切り替えてから空だと、それまで
+    見えていた控えまで見失う。
+    """
+    current = _backup_path() or ""
+    options = {"fileFilter": "Color Override の控え (*.json);;すべて (*.*)",
+               "dialogStyle": 2, "fileMode": 1,
+               "caption": "読み込む控えを選ぶ"}
+    folder = os.path.dirname(current)
+    if folder and os.path.isdir(folder):
+        options["startingDirectory"] = folder
+
+    chosen = cmds.fileDialog2(**options) or []
+    if not chosen:
+        return
+
+    path = chosen[0]
+    if not _read_backup(path):
+        cmds.warning("[%s] 色分けが入っていないので切り替えません: %s"
+                     % (_PACKAGE, path))
+        return
+
+    _remember_backup_path(path)
+    _refresh_list()
+    print("[%s] backup: %s" % (_PACKAGE, path))
+
+
+def _on_reset_backup(*_args):
+    """控えの選択を解除して、シーンの隣に戻す。"""
+    if not _chosen_backup_path():
+        return
+    _remember_backup_path(None)
+    _refresh_list()
+    print("[%s] backup: %s" % (_PACKAGE, _backup_path() or "（未保存）"))
 
 
 def _on_open_backup(*_args):
@@ -1062,9 +1345,41 @@ def _build_body():
 
     # 一覧は行ごとに色見本（canvas）を並べるので textScrollList では作れない。
     # scrollLayout の中に rowLayout を並べ、更新のたびに丸ごと作り直す
-    _CTRL["list"] = cmds.scrollLayout(height=170, childResizable=True,
+    _CTRL["list"] = cmds.scrollLayout(height=140, childResizable=True,
                                       horizontalScrollBarThickness=0)
     _CTRL["rows"] = cmds.columnLayout(adjustableColumn=True, rowSpacing=2)
+    cmds.setParent("..")
+    cmds.setParent("..")
+
+    # 控えは**別の欄**に出す。 `Restore` したセットが上の一覧から消えて
+    # ここに移る、という見え方にするため（混ぜると片付いたのか分からない）。
+    # **空でも畳まない。** 「控えを保存したのに 0 件」のときにこそ
+    # 「読み込む…」で探しに行きたいので、入口を隠すと詰む
+    _CTRL["backup_frame"] = cmds.frameLayout(
+        label="控え  —  0 セット", collapsable=True, collapse=False,
+        marginHeight=4, marginWidth=2,
+        ann="Restore で片付けたセット。 「復元」で同じ色分けを掛け直す")
+    cmds.columnLayout(adjustableColumn=True, rowSpacing=3)
+
+    cmds.rowLayout(numberOfColumns=3, adjustableColumn=1,
+                   columnWidth3=(190, 86, 74),
+                   columnAlign3=("left", "center", "center"))
+    _CTRL["backup_path"] = cmds.text(label="", align="left",
+                                     fn="smallPlainLabelFont")
+    cmds.button(label="読み込む…", height=22, c=_on_choose_backup,
+                ann=("別の控え（JSON）を開く。\n"
+                     "前のシーンの控えや、共有フォルダに置いた控えも読める"))
+    _CTRL["backup_reset"] = cmds.button(
+        label="既定", height=22, c=_on_reset_backup, enable=False,
+        ann="控えの選択を解除して、シーンの隣に戻す")
+    cmds.setParent("..")
+
+    _CTRL["backup_list"] = cmds.scrollLayout(height=92, childResizable=True,
+                                             horizontalScrollBarThickness=0)
+    _CTRL["backup_rows"] = cmds.columnLayout(adjustableColumn=True,
+                                             rowSpacing=2)
+    cmds.setParent("..")
+    cmds.setParent("..")
     cmds.setParent("..")
     cmds.setParent("..")
 
@@ -1092,7 +1407,7 @@ def show():
 
     win = cmds.window(WINDOW,
                       title="Color Override  —  v%s" % (__version__,),
-                      widthHeight=(440, 510),
+                      widthHeight=(440, 610),
                       minimizeButton=True, maximizeButton=False, sizeable=True)
     cmds.columnLayout(adjustableColumn=True, rowSpacing=8,
                       columnAttach=("both", 10))

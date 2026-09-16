@@ -42,7 +42,7 @@
 from __future__ import annotations
 
 # 先に定義する（サブモジュールが `from . import __version__` で参照するため）
-__version__ = "0.4.0"
+__version__ = "0.7.0"
 
 # シェルフボタンに出す短い名前（10 文字以内）。 ハブ `install.py` がここを読んで
 # ボタンを貼る。 **表示名であってツール名ではない**ので接頭辞は付けない
