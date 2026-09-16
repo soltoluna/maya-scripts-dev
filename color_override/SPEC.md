@@ -1,7 +1,7 @@
 # Color Override — 詳細仕様
 
 ## 概要
-- バージョン: 0.9.1 / 対応Maya: 2024+
+- バージョン: 0.9.2 / 対応Maya: 2024+
 - カテゴリ: Utility
 - 表示場所: シェルフボタン `ColorOvr`（左クリックで起動）
 - 選択したオブジェクトを任意の色でフラットに塗り分け、同系色のオブジェクトの
@@ -287,6 +287,32 @@ ntk_color_override_<対象名>_SG     上をつないだ shadingEngine
 
 **確認済みは Maya 2024 のみ。 2025 は全版とも未確認**（会社では 2024 と 2025 の
 両方を使うので、これは残っている宿題）。
+
+### v0.9.2
+- 調査用レイヤーの片付けを実機の API に合わせて修正。 **`RenderLayer` に
+  削除メソッドは無い**ので `rs.detachRenderLayer(layer)` →
+  `cmds.delete(layer.name())` の順。 消す前に既定レイヤーへ戻す
+  （表示中のレイヤーを消すとビューポートが宙に浮く）
+- 対象の渡し方を**静的選択優先**にした（パターンは名前が一致する無関係な
+  ノードまで拾う）
+
+#### v0.9.1 の実機調査で確定した API（v1.0.0 はこれで書く）
+
+```python
+rs    = renderSetup.instance()
+layer = rs.createRenderLayer(name)
+col   = layer.createCollection(name)
+col.getSelector().setStaticSelection(nodes)
+ov    = col.createOverride(name, typeIDs.materialOverride)
+ov.setMaterial(shading_engine)      # setShader は存在しない。SG を渡す
+rs.switchToLayer(layer)
+```
+
+- `MaterialOverride` は `override` ではなく **`connectionOverride`** モジュール
+- **元の表示レイヤーは `rs.getVisibleRenderLayer()` で覚えて戻せる**
+  （実作業のレンダーレイヤーがあるシーンでも割り込まない）
+- 片付けは `rs.detachRenderLayer(layer)` → `cmds.delete(layer.name())`
+- セレクタは `setStaticSelection` / `setPattern` のどちらも使える
 
 ### v0.9.1
 - **`color_override.probe_render_setup()` を追加**（下調べのみ。 既定では

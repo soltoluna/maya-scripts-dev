@@ -3,6 +3,41 @@
 現時点の仕様と確定した設計判断は `SPEC.md` を参照。 ここではバージョンごとの
 経緯・試行錯誤・不具合修正の細部を記録する。 降順（新しい順）。
 
+## 0.9.2 — 調査用レイヤーの片付けを直す
+
+v0.9.1 の `try_it=True` を実機で走らせてもらい、**API が全部確定した。**
+
+```python
+rs    = renderSetup.instance()
+layer = rs.createRenderLayer(name)
+col   = layer.createCollection(name)
+col.getSelector().setStaticSelection(nodes)
+ov    = col.createOverride(name, typeIDs.materialOverride)
+ov.setMaterial(shading_engine)      # ← setShader は存在しない
+rs.switchToLayer(layer)
+```
+
+- `MaterialOverride` は `override` ではなく **`connectionOverride`** モジュールに
+  居た（だから v0.9.1 のクラス一覧に出ていなかった）
+- **`setShader` は無く `setMaterial(shadingEngine)`。** シェーダーではなく
+  shadingEngine を渡す（`kShadingEngineNameLong` / `saveShadingEngine` を
+  持っているのも符合する）
+- セレクタは `setStaticSelection` / `setPattern` のどちらも通る
+
+### 片付けが壊れていた
+
+`_probe_cleanup()` が `layer.detachAndDelete()` を呼んでいたが、**`RenderLayer` に
+削除メソッドは無い。** 調査用レイヤーがシーンに残ったままになる。
+
+`rs.detachRenderLayer(layer)` → `cmds.delete(layer.name())` に直した。
+**消す前に既定レイヤーへ戻す** — 表示中のレイヤーを消すとビューポートが宙に浮く。
+
+### 対象の渡し方を静的選択優先にした
+
+v0.9.1 は `setPattern` を先に試し、それが通ったので静的選択を試していない。
+**パターンは名前が一致する無関係なノードまで拾う**ので、ツールとしては静的選択の
+ほうが正しい。 順序を入れ替えた。
+
 ## 0.9.1 — レンダーセットアップ方式の下調べ
 
 v0.9.0 でもフェース割り当てが戻らない。 **読み取りの当て推量を 3 版続けて

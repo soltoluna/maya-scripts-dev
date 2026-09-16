@@ -1551,14 +1551,15 @@ def _probe_try(rgb=(1.0, 0.0, 0.0)):
     print("    getSelector        : %r" % (selector,))
     print("      selector methods : %r" % (_public_names(selector),))
 
-    # セレクタに対象を渡す — ありそうな順に試す
+    # セレクタに対象を渡す。 **静的選択を先に試す** — パターンは名前が
+    # 一致する無関係なノードまで拾うので、ツールとしては静的選択が正しい
     for label, call in (
-            ("setPattern",
-             lambda: selector.setPattern(", ".join(nodes))),
+            ("setStaticSelection",
+             lambda: selector.setStaticSelection(list(nodes))),
             ("staticSelection.set",
              lambda: selector.staticSelection.set(list(nodes))),
-            ("setStaticSelection",
-             lambda: selector.setStaticSelection(list(nodes)))):
+            ("setPattern",
+             lambda: selector.setPattern(", ".join(nodes)))):
         result = _safe(call)
         print("      %-20s -> %r" % (label, result))
         if not isinstance(result, str):
@@ -1582,9 +1583,9 @@ def _probe_try(rgb=(1.0, 0.0, 0.0)):
         return
     print("      override methods : %r" % (_public_names(override),))
 
-    # オーバーライドにシェーダーを渡す — ここも総当たり
+    # **`setMaterial(shadingEngine)` が正解**（v0.9.1 の実機調査で確定。
+    # `setShader` は存在しない）。 代替は念のため残してある
     for label, call in (
-            ("setShader", lambda: override.setShader(shader)),
             ("setMaterial", lambda: override.setMaterial(engine)),
             ("setSource", lambda: override.setSource(shader + ".outColor")),
             ("connectAttr(attrValue)",
@@ -1602,26 +1603,45 @@ def _probe_try(rgb=(1.0, 0.0, 0.0)):
     print("  片付け: color_override.probe_render_setup(cleanup=True)")
 
 
+def _delete_render_layer(instance, layer):
+    """レンダーセットアップのレイヤーを消す。
+
+    **`RenderLayer` 自体に削除メソッドは無い**（v0.9.1 の実機調査で判明。
+    v0.9.1 の片付けは `detachAndDelete()` を呼んでいて何もできていなかった）。
+    レンダーセットアップから外してからノードを消す。
+    """
+    print("    detachRenderLayer  : %r"
+          % (_safe(instance.detachRenderLayer, layer),))
+    node = _safe(layer.name)
+    if isinstance(node, str) and not node.startswith("<") and             cmds.objExists(node):
+        print("    delete(%s): %r" % (node, _safe(cmds.delete, node)))
+
+
 def _probe_cleanup():
     """調査で作ったものを消す。"""
     name = _NS + _PROBE_SUFFIX
     render_setup = _import(_RENDER_SETUP_MODULES[0])
     if not isinstance(render_setup, str):
         instance = _safe(render_setup.instance)
-        print("  switchToLayer(master): %r"
-              % (_safe(getattr(instance, "switchToLayer", None),
-                       _safe(getattr(instance, "getDefaultRenderLayer", None))),))
-        for layer in (_safe(instance.getRenderLayers) or []):
-            if isinstance(layer, str):
-                break
+
+        # **先に既定のレイヤーへ戻す。** 表示中のレイヤーを消すと
+        # ビューポートが宙に浮く
+        master = _safe(instance.getDefaultRenderLayer)
+        if not isinstance(master, str):
+            print("    switchToLayer(master): %r"
+                  % (_safe(instance.switchToLayer, master),))
+
+        layers = _safe(instance.getRenderLayers)
+        for layer in (layers if isinstance(layers, (list, tuple)) else []):
             if _safe(layer.name) == name:
-                print("  detachAndDelete      : %r"
-                      % (_safe(getattr(layer, "detachAndDelete", None)),))
+                _delete_render_layer(instance, layer)
 
     for node in (name + "_SHD", name + "_SG"):
         if cmds.objExists(node):
             cmds.delete(node)
-            print("  deleted              : %s" % (node,))
+            print("    deleted            : %s" % (node,))
+    print("  片付け完了。 Render Setup ウィンドウに残っていないか確認を。")
+
 
 
 def probe_render_setup(try_it=False, cleanup=False):
