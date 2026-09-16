@@ -855,5 +855,247 @@ class RenderSetupProbeCase(unittest.TestCase):
                 self.module.NAMESPACE + "_"))
 
 
+class _FakeRenderSetup(object):
+    """`renderlayer` の差し替え。 **呼ばれた内容だけを記録する。**
+
+    実物は `maya.app.renderSetup` を使うので開発機では動かない。 ここで
+    押さえるのは「割り当てを触らないこと」と「呼ぶ順番」まで。
+    """
+
+    def __init__(self, fail=False):
+        from color_override import renderlayer as real
+        self.RenderSetupError = real.RenderSetupError
+        self.fail = fail
+        self.calls = []
+        self.collections = {}
+        self.visible = False
+
+    def _log(self, name, *args):
+        self.calls.append((name,) + args)
+
+    def available(self):
+        return True
+
+    def create_collection(self, layer, name, nodes, engine):
+        self._log("create_collection", layer, name, tuple(nodes), engine)
+        if self.fail:
+            raise self.RenderSetupError("作れません")
+        self.collections[name] = {"nodes": list(nodes), "enabled": True}
+        return name
+
+    def set_collection_members(self, layer, name, nodes):
+        self._log("set_collection_members", layer, name, tuple(nodes))
+        self.collections.setdefault(name, {})["nodes"] = list(nodes)
+        return True
+
+    def collection_members(self, layer, name):
+        return list(self.collections.get(name, {}).get("nodes", []))
+
+    def set_collection_enabled(self, layer, name, enabled):
+        self._log("set_collection_enabled", layer, name, enabled)
+        self.collections.setdefault(name, {})["enabled"] = enabled
+        return True
+
+    def collection_is_enabled(self, layer, name):
+        return bool(self.collections.get(name, {}).get("enabled"))
+
+    def delete_collection(self, layer, name):
+        self._log("delete_collection", layer, name)
+        self.collections.pop(name, None)
+        return True
+
+    def collection_count(self, layer):
+        return len(self.collections)
+
+    def layer_is_visible(self, layer):
+        return self.visible
+
+    def show_layer(self, layer):
+        self._log("show_layer", layer)
+        self.visible = True
+        return "someOtherLayer"
+
+    def show_default_layer(self, previous=""):
+        self._log("show_default_layer", previous)
+        self.visible = False
+
+    def delete_layer(self, layer):
+        self._log("delete_layer", layer)
+        return True
+
+
+class RenderLayerModeCase(unittest.TestCase):
+    """**v1.0.0 の核心 — 掛けるときに割り当てを触らない。**
+
+    マテリアルを差し替える方式は、掛けた時点でフェース単位の割り当てを
+    落とす。 レンダーセットアップのマテリアルオーバーライドは割り当てを
+    触らないので、その問題が起きる構造そのものが無い。
+    """
+
+    SHAPE = "|a|aShape"
+
+    def setUp(self):
+        from maya import cmds
+        _bootstrap.reset_registry()
+        self.module = _bootstrap.reload_tool()
+        self.ui = self.module.ui
+        self.fake = _FakeRenderSetup()
+        self.ui.renderlayer = self.fake
+        self.ui._mode = lambda: self.ui._MODE_LAYER
+        cmds.objExists = lambda *a, **k: True
+        self.addCleanup(lambda: delattr(cmds, "objExists"))
+
+    def _apply(self, node=SHAPE):
+        records, index = [], {}
+        self.records = records
+        return self.ui._apply_one(node, (1.0, 0.0, 0.0), "Set 1", records,
+                                  index, self.ui._assignment_resolver([]))
+
+    def _force_element_calls(self):
+        return [kwargs.get("forceElement") for name, _a, kwargs
+                in _bootstrap.CALLS
+                if name == "sets" and kwargs.get("forceElement")]
+
+    # -- 掛ける --------------------------------------------------------------
+
+    def test_applying_never_touches_the_assignment(self):
+        """**これが v1.0.0 の存在理由。** `forceElement` を一度も呼ばない。"""
+        self.assertIsNotNone(self._apply())
+        self.assertEqual(self._force_element_calls(), [],
+                         "割り当てを書き換えている")
+
+    def test_it_creates_a_collection_for_the_shapes(self):
+        self._apply()
+        created = [call for call in self.fake.calls
+                   if call[0] == "create_collection"]
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0][3], (self.SHAPE,))
+
+    def test_the_collection_name_is_written_to_the_shader(self):
+        """記録の情報源はシーン側。 開き直しても戻せるようにする。"""
+        self._apply()
+        written = [args[1] for name, args, _k in _bootstrap.CALLS
+                   if name == "setAttr" and len(args) > 1
+                   and str(args[0]).endswith(self.ui._ATTR_COLLECTION)]
+        self.assertEqual(len(written), 1)
+        self.assertIn(written[0], self.fake.collections)
+
+    def test_applying_shows_the_layer(self):
+        """掛けても表示レイヤーが切り替わらなければ、色は出ない。"""
+        self._apply()
+        self.assertIn("show_layer",
+                      [call[0] for call in self.fake.calls])
+
+    def test_a_failure_leaves_no_stray_nodes(self):
+        """途中で失敗したときに、使われないシェーダーを残さない。"""
+        self.fake.fail = True
+        self.assertIsNone(self._apply())
+        deleted = [args for name, args, _k in _bootstrap.CALLS
+                   if name == "delete"]
+        self.assertEqual(len(deleted), 2, "シェーダーと SG を片付けていない")
+        self.assertTrue(_bootstrap.MESSAGES, "警告が出ていない")
+
+    # -- 隠す / 戻す ---------------------------------------------------------
+
+    def _record(self, enabled=True):
+        return {"shader": "shd", "sg": "sg", "collection": "col",
+                "target": self.SHAPE, "members": [self.SHAPE],
+                "originals": [""], "faces": {}, "enabled": enabled}
+
+    def test_hiding_only_disables_the_collection(self):
+        """**外すときも割り当てを触らない。**"""
+        self.fake.collections["col"] = {"nodes": [self.SHAPE], "enabled": True}
+        self.ui._collect_records = lambda: []
+        self.assertEqual(self.ui._disable_records([self._record()]), 1)
+        self.assertEqual(self._force_element_calls(), [])
+        self.assertIn(("set_collection_enabled", self.ui._LAYER_NAME, "col",
+                       False), self.fake.calls)
+
+    def test_hiding_everything_leaves_the_layer(self):
+        """全部外したら元の表示レイヤーへ帰す（表示を奪ったままにしない）。"""
+        self.fake.collections["col"] = {"nodes": [self.SHAPE], "enabled": True}
+        self.ui._collect_records = lambda: []
+        self.ui._disable_records([self._record()])
+        self.assertIn("show_default_layer",
+                      [call[0] for call in self.fake.calls])
+
+    def test_showing_again_enables_the_collection(self):
+        self.fake.collections["col"] = {"nodes": [self.SHAPE], "enabled": False}
+        self.assertEqual(self.ui._enable_records([self._record(False)]), 1)
+        self.assertIn(("set_collection_enabled", self.ui._LAYER_NAME, "col",
+                       True), self.fake.calls)
+
+    def test_restoring_does_not_put_anything_back(self):
+        """**戻す先が無い。** 触れば逆に壊す。"""
+        self.ui._return_to_originals([self._record()])
+        self.assertEqual(self._force_element_calls(), [])
+
+    def test_deleting_removes_the_collection(self):
+        self.fake.collections["col"] = {"nodes": [self.SHAPE], "enabled": True}
+        self.ui._delete_override(self._record())
+        self.assertIn(("delete_collection", self.ui._LAYER_NAME, "col"),
+                      self.fake.calls)
+
+    def test_a_released_shape_leaves_the_collection(self):
+        """1 シェイプ = 1 オーバーライド。 古いほうに残すと色が不定になる。"""
+        record = self._record()
+        record["members"] = [self.SHAPE, "|b|bShape"]
+        records = [record]
+        index = core.index_by_object(records)
+        self.ui._release_members(records, index, [self.SHAPE])
+        self.assertIn(("set_collection_members", self.ui._LAYER_NAME, "col",
+                       ("|b|bShape",)), self.fake.calls)
+
+
+class ModeCase(unittest.TestCase):
+    """掛け方の選択。"""
+
+    def setUp(self):
+        _bootstrap.reset_registry()
+        self.module = _bootstrap.reload_tool()
+        self.ui = self.module.ui
+
+    def test_it_falls_back_when_render_setup_is_missing(self):
+        """**開発機にもこの環境にもレンダーセットアップは無い。**
+
+        使えないときに既定がレンダーレイヤーのままだと、色が掛からない。
+        """
+        self.assertFalse(self.module.renderlayer.available())
+        self.assertEqual(self.ui._mode(), self.ui._MODE_SHADER)
+
+    def test_the_choice_is_remembered(self):
+        self.ui._set_mode(self.ui._MODE_SHADER)
+        self.assertEqual(self.ui._mode(), self.ui._MODE_SHADER)
+        self.assertEqual(_bootstrap.OPTION_VARS[self.ui._OPTVAR_MODE],
+                         self.ui._MODE_SHADER)
+
+    def test_a_broken_stored_value_falls_back(self):
+        from maya import cmds
+        cmds.optionVar(sv=(self.ui._OPTVAR_MODE, "nonsense"))
+        self.assertEqual(self.ui._mode(), self.ui._MODE_SHADER)
+
+    def test_the_option_var_is_namespaced(self):
+        for key in (self.ui._OPTVAR_MODE, self.ui._OPTVAR_PREV_LAYER):
+            with self.subTest(key=key):
+                self.assertTrue(key.startswith(self.module.NAMESPACE + "_"))
+
+    def test_the_layer_name_is_namespaced(self):
+        """シーンに作るレイヤーも他人のものとぶつからない札を付ける。"""
+        self.assertTrue(
+            self.ui._LAYER_NAME.startswith(self.module.NAMESPACE + "_"))
+
+    def test_the_window_offers_both_modes(self):
+        self.module.show()
+        self.assertIn("mode", self.ui._CTRL)
+        stored = _bootstrap.CONTROLS[self.ui._CTRL["mode"]]
+        self.assertEqual(stored.get("numberOfRadioButtons"), 2)
+
+    def test_the_unusable_mode_is_disabled_in_the_window(self):
+        """使えない掛け方を選べてしまうと、押しても色が出ない。"""
+        self.module.show()
+        stored = _bootstrap.CONTROLS[self.ui._CTRL["mode"]]
+        self.assertFalse(stored.get("enable1"))
+
+
 if __name__ == "__main__":
     unittest.main()

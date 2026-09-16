@@ -42,7 +42,7 @@
 from __future__ import annotations
 
 # 先に定義する（サブモジュールが `from . import __version__` で参照するため）
-__version__ = "0.9.2"
+__version__ = "1.0.0"
 
 # シェルフボタンに出す短い名前（10 文字以内）。 ハブ `install.py` がここを読んで
 # ボタンを貼る。 **表示名であってツール名ではない**ので接頭辞は付けない
@@ -62,12 +62,13 @@ NAMESPACE = "ntk"
 # ──────────────────────────────────────────────────────────────────────────
 
 from . import core      # noqa: E402  Maya 非依存の純ロジック
+from . import renderlayer  # noqa: E402  レンダーセットアップ越しの色掛け
 from . import dev_tools  # noqa: E402  バージョン表示 / GitHub から更新
 from . import ui        # noqa: E402  cmds による UI
 
 __all__ = ["show", "toggle", "diagnose", "probe_render_setup",
-           "core", "ui", "dev_tools", "__version__", "NAMESPACE",
-           "SHELF_LABEL"]
+           "core", "ui", "renderlayer", "dev_tools", "__version__",
+           "NAMESPACE", "SHELF_LABEL"]
 
 
 def show():

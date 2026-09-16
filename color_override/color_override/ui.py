@@ -57,7 +57,7 @@ import os
 
 from maya import cmds
 
-from . import NAMESPACE, __version__, core, dev_tools
+from . import NAMESPACE, __version__, core, dev_tools, renderlayer
 
 
 # Maya の optionVar / scriptJob / ウィンドウ名はフラットな 1 つの名前空間を
@@ -109,6 +109,28 @@ _FACE_PLUG = ".objectGroups["
 # 所属セット名。 一覧を畳む単位で、これが無い記録（v0.3.0 以前）は Unnamed へ
 _ATTR_SET = NAMESPACE + "ColorOverrideSet"
 
+# **レンダーセットアップ方式で作ったコレクションの名前。**
+# これが入っている記録は「割り当てを触っていない」ので、戻すのは
+# コレクションを消すだけで済む（元マテリアルの控えが要らない）
+_ATTR_COLLECTION = NAMESPACE + "ColorOverrideCollection"
+
+# ─── 掛け方 ────────────────────────────────────────────────────────────────
+# **既定はレンダーセットアップ。** マテリアルの割り当てを書き換えないので、
+# フェース単位の割り当て（マルチマテリアル）を壊さない。
+#
+# 旧方式（シェーダー差し替え）も残してある。 レンダーセットアップが使えない
+# 環境で**色を塗る手段そのものが無くなる**のを避けるため（2026-09-16 決定）。
+_MODE_LAYER = "renderlayer"
+_MODE_SHADER = "shader"
+_OPTVAR_MODE = _NS + "_mode"
+
+# シーンに作るレンダーセットアップのレイヤー名。 1 本だけ使い回す
+_LAYER_NAME = _NS
+
+# こちらが表示を奪う前に出ていたレイヤー。 戻すときにここへ帰す
+# （実作業のレンダーレイヤーがあるシーンで表示を奪ったままにしない）
+_OPTVAR_PREV_LAYER = _NS + "_prev_layer"
+
 # シェーダーを持たないオブジェクトを戻すときの行き先（Maya の既定）
 _DEFAULT_SG = "initialShadingGroup"
 
@@ -131,6 +153,33 @@ _CTRL = {}        # コントロール名の控え。 show() のたびに作り�
 # --------------------------------------------------------------------------- #
 # シーンの読み取り
 # --------------------------------------------------------------------------- #
+
+def _mode():
+    """いまの掛け方。 指定が無ければレンダーセットアップ（使えなければ旧方式）。"""
+    if cmds.optionVar(exists=_OPTVAR_MODE):
+        stored = cmds.optionVar(q=_OPTVAR_MODE)
+        if stored in (_MODE_LAYER, _MODE_SHADER):
+            return stored
+    return _MODE_LAYER if renderlayer.available() else _MODE_SHADER
+
+
+def _set_mode(mode):
+    cmds.optionVar(sv=(_OPTVAR_MODE, mode))
+
+
+def _layer_call(func, *args, **kwargs):
+    """レンダーセットアップの操作。 失敗は警告にして `None` を返す。
+
+    **ここで例外を上げない。** レンダーセットアップ側の都合で
+    「色を掛ける」「戻す」が丸ごと止まるのが、このツールで最も避けたい壊れ方
+    （v0.5.0〜v0.8.0 の轍）。
+    """
+    try:
+        return func(*args, **kwargs)
+    except renderlayer.RenderSetupError as exc:
+        cmds.warning("[%s] %s" % (_PACKAGE, exc))
+        return None
+
 
 def _shapes_of(node):
     """色を割り当てる相手（シェイプ）をフルパスで返す。
@@ -284,9 +333,23 @@ def _collect_records():
             legacy))
         live = members or stored
 
+        # **レンダーセットアップ方式の記録はコレクション名を持つ。**
+        # そちらは割り当てを触っていないので、戻し先の控えを一切見ない
+        collection = _read_attr(shader, _ATTR_COLLECTION)
+        if collection:
+            live = (_layer_call(renderlayer.collection_members,
+                                _LAYER_NAME, collection) or stored)
+            enabled = bool(
+                _layer_call(renderlayer.collection_is_enabled,
+                            _LAYER_NAME, collection)
+                and _layer_call(renderlayer.layer_is_visible, _LAYER_NAME))
+        else:
+            enabled = bool(members)
+
         records.append({
             "shader": shader,
             "sg": shading_engines[0] if shading_engines else None,
+            "collection": collection,
             "original": legacy,
             "originals": [known.get(name, legacy) for name in live],
             # フェース単位で分かれていたシェイプの戻し先（無ければ空）
@@ -296,7 +359,7 @@ def _collect_records():
             "set": _read_attr(shader, _ATTR_SET),
             "color": tuple(color[0])[:3],
             "members": live,
-            "enabled": bool(members),
+            "enabled": enabled,
         })
     records.sort(key=lambda rec: core.short_name(rec["target"]))
     return records
@@ -569,6 +632,9 @@ def _write_assignment(shader, members, originals, faces=None):
 
 def _delete_override(record):
     """オーバーライド用に作ったノードを片付ける。"""
+    if record.get("collection"):
+        _layer_call(renderlayer.delete_collection, _LAYER_NAME,
+                    record["collection"])
     for node in (record.get("sg"), record.get("shader")):
         if node and cmds.objExists(node):
             cmds.delete(node)
@@ -638,8 +704,14 @@ def _release_members(records, index, shapes):
         record["faces"] = faces
 
         if keep:
-            _write_assignment(record["shader"], keep, record["originals"],
-                              faces)
+            if record.get("collection"):
+                _layer_call(renderlayer.set_collection_members, _LAYER_NAME,
+                            record["collection"], keep)
+                _write_string(record["shader"], _ATTR_MEMBERS,
+                              core.join_members(keep))
+            else:
+                _write_assignment(record["shader"], keep, record["originals"],
+                                  faces)
             continue
 
         _delete_override(record)
@@ -688,6 +760,9 @@ def _apply_one(node, rgb, set_name, records, index, resolve_assignment):
         cmds.warning("[%s] %s にシェイプが見つかりません。"
                      % (_PACKAGE, core.short_name(node)))
         return None
+
+    if _mode() == _MODE_LAYER:
+        return _apply_one_layer(node, rgb, set_name, shapes, records, index)
 
     # **割り当てを書き換える前に、シェイプごとの戻し先を控える。**
     assignments = [resolve_assignment(shape) for shape in shapes]
@@ -739,11 +814,108 @@ def _apply_one(node, rgb, set_name, records, index, resolve_assignment):
     return shader
 
 
+def _make_override_shader(node, rgb):
+    """表示用の `surfaceShader` + `shadingEngine` を作って返す。
+
+    どちらの掛け方でも同じものを使う。 違うのは**それを対象にどう届けるか**
+    だけ（割り当てを差し替えるか、レイヤーのオーバーライドにするか）。
+    """
+    shader_name, sg_name = core.override_node_names(_NODE_PREFIX, node)
+    shader = cmds.shadingNode("surfaceShader", asShader=True, name=shader_name)
+    shading_engine = cmds.sets(name=sg_name, renderable=True,
+                               noSurfaceShader=True, empty=True)
+    cmds.connectAttr(shader + ".outColor", shading_engine + ".surfaceShader",
+                     force=True)
+    cmds.setAttr(shader + ".outColor", rgb[0], rgb[1], rgb[2], type="double3")
+    return (shader, shading_engine)
+
+
+def _apply_one_layer(node, rgb, set_name, shapes, records, index):
+    """レンダーセットアップのマテリアルオーバーライドで色を掛ける。
+
+    **対象の割り当てを一切触らない。** だから
+
+      * フェース単位の割り当てを読み取る必要が無い（v0.5.0〜v0.9.2 が
+        実機で通らず 3 版続けて外したのがその読み取り）
+      * 元マテリアルを控える必要が無い
+      * 戻すのはコレクションを消すだけ
+
+    掛かって見えるのは**このレイヤーが表示されている間だけ**なので、
+    掛けたら表示を奪う。 奪う前のレイヤーは覚えておいて、全部戻したときに帰す。
+    """
+    shader, shading_engine = _make_override_shader(node, rgb)
+    collection = _layer_call(
+        renderlayer.create_collection, _LAYER_NAME,
+        core.sanitize_identifier(shading_engine) + "_COL",
+        shapes, shading_engine)
+
+    if not collection:
+        # 作れなかったらこちらの後始末をしてから引き下がる。 中途半端な
+        # ノードを残さない
+        for stray in (shading_engine, shader):
+            if cmds.objExists(stray):
+                cmds.delete(stray)
+        cmds.warning("[%s] %s: レンダーセットアップで色を掛けられません。"
+                     % (_PACKAGE, core.short_name(node)))
+        return None
+
+    _release_members(records, index, shapes)
+
+    # `_ATTR_ORIGINAL` は「このツールが作ったシェーダーか」の目印も兼ねるので、
+    # 戻し先が無いレイヤー方式でも必ず書く（値は空）
+    _write_string(shader, _ATTR_ORIGINAL, "")
+    _write_string(shader, _ATTR_TARGET, node)
+    _write_string(shader, _ATTR_SET, set_name)
+    _write_string(shader, _ATTR_COLLECTION, collection)
+    _write_string(shader, _ATTR_MEMBERS, core.join_members(shapes))
+
+    _show_layer()
+
+    record = {"shader": shader, "sg": shading_engine, "collection": collection,
+              "original": "", "originals": [""] * len(shapes), "faces": {},
+              "target": node, "members": shapes, "set": set_name,
+              "enabled": True}
+    records.append(record)
+    for name in [node] + shapes:
+        index.setdefault(name, record)
+        index.setdefault(core.short_name(name), record)
+    index[node] = record
+    return shader
+
+
+def _show_layer():
+    """色のレイヤーを表示する。 **奪う前の表示レイヤーを覚えておく。**"""
+    if _layer_call(renderlayer.layer_is_visible, _LAYER_NAME):
+        return
+    previous = _layer_call(renderlayer.show_layer, _LAYER_NAME)
+    if previous:
+        cmds.optionVar(sv=(_OPTVAR_PREV_LAYER, previous))
+
+
+def _leave_layer():
+    """色のレイヤーから抜けて、元の表示レイヤーへ帰す。"""
+    previous = ""
+    if cmds.optionVar(exists=_OPTVAR_PREV_LAYER):
+        previous = cmds.optionVar(q=_OPTVAR_PREV_LAYER) or ""
+    _layer_call(renderlayer.show_default_layer, previous)
+    if cmds.optionVar(exists=_OPTVAR_PREV_LAYER):
+        cmds.optionVar(remove=_OPTVAR_PREV_LAYER)
+
+
 def _enable_records(records):
     """一時解除していたオーバーライドを掛け直す。 戻した件数を返す。"""
     restored = 0
+    if any(record.get("collection") and not record.get("enabled", True)
+           for record in records or []):
+        _show_layer()
+
     for record in records or []:
         if record.get("enabled", True):
+            continue
+        if record.get("collection"):
+            if _layer_call(renderlayer.set_collection_enabled, _LAYER_NAME,
+                           record["collection"], True):
+                restored += 1
             continue
         shading_engine = record.get("sg")
         if not shading_engine or not cmds.objExists(shading_engine):
@@ -766,14 +938,35 @@ def _disable_records(records):
     if not targets:
         return 0
 
-    # どこへ戻すかを先に控える。 外した時点で shadingEngine が空になり、
-    # シーンからは「何に掛かっていたか」が読めなくなる
-    for record in targets:
-        _write_assignment(record.get("shader"), record.get("members"),
-                          record.get("originals"), record.get("faces"))
+    # レイヤー方式はコレクションを無効にするだけ。 割り当てを触っていないので
+    # 「どこへ戻すか」を控える必要が無い
+    layered = [rec for rec in targets if rec.get("collection")]
+    for record in layered:
+        _layer_call(renderlayer.set_collection_enabled, _LAYER_NAME,
+                    record["collection"], False)
 
-    _return_to_originals(targets)
+    plain = [rec for rec in targets if not rec.get("collection")]
+    if plain:
+        # どこへ戻すかを先に控える。 外した時点で shadingEngine が空になり、
+        # シーンからは「何に掛かっていたか」が読めなくなる
+        for record in plain:
+            _write_assignment(record.get("shader"), record.get("members"),
+                              record.get("originals"), record.get("faces"))
+        _return_to_originals(plain)
+
+    if layered and not _any_collection_enabled():
+        _leave_layer()
     return len(targets)
+
+
+def _any_collection_enabled():
+    """レイヤー方式の記録で、まだ有効なものが残っているか。"""
+    for record in _collect_records():
+        if record.get("collection") and _layer_call(
+                renderlayer.collection_is_enabled, _LAYER_NAME,
+                record["collection"]):
+            return True
+    return False
 
 
 def _return_to_originals(records):
@@ -788,6 +981,9 @@ def _return_to_originals(records):
 
     元のマテリアルが既に消えていたら Maya の既定へ逃がす。
     """
+    # **レイヤー方式の記録は戻さない。** 割り当てを触っていないので、
+    # 戻す先も戻す必要も無い（触れば逆に壊す）
+    records = [rec for rec in records or [] if not rec.get("collection")]
     for original, items in core.restore_plan(records, _DEFAULT_SG):
         # コンポーネントは持ち主のシェイプの有無で見る（`objExists` に
         # `pCubeShape1.f[0:2]` を渡したときの挙動に寄りかからない）
@@ -948,6 +1144,11 @@ def _restore(records, label, sets=None):
         _return_to_originals(records)
         for record in records:
             _delete_override(record)
+        # レイヤーが空になったら、レイヤーごと消して元の表示に帰す。
+        # **シーンに何も残さない**のがこのツールの方針
+        if _layer_call(renderlayer.collection_count, _LAYER_NAME) == 0:
+            _leave_layer()
+            _layer_call(renderlayer.delete_layer, _LAYER_NAME)
 
     _in_undo_chunk(label, _run)
     _refresh_list()
@@ -1336,6 +1537,29 @@ def _on_reset_backup(*_args):
     print("[%s] backup: %s" % (_PACKAGE, _backup_path() or "（未保存）"))
 
 
+def _on_mode_changed(*_args):
+    """掛け方を切り替える。 **すでに掛かっているものは切り替えない。**
+
+    記録ごとに「どちらで掛けたか」を持っているので、混ざっていても正しく
+    戻せる。 掛け直しのときに新しい掛け方になる。
+    """
+    ctrl = _CTRL.get("mode")
+    if not ctrl:
+        return
+    which = cmds.radioButtonGrp(ctrl, q=True, select=True)
+    mode = _MODE_LAYER if which == 1 else _MODE_SHADER
+
+    if mode == _MODE_LAYER and not renderlayer.available():
+        cmds.warning("[%s] この環境ではレンダーセットアップを使えません。"
+                     % (_PACKAGE,))
+        cmds.radioButtonGrp(ctrl, edit=True, select=2)
+        return
+
+    _set_mode(mode)
+    print("[%s] mode: %s（すでに掛かっているものはそのまま）"
+          % (_PACKAGE, mode))
+
+
 def _on_open_backup(*_args):
     """控えの JSON がどこにあるかを示す（場所を確かめたいとき）。"""
     path = _backup_path()
@@ -1712,6 +1936,20 @@ def _build_body():
     cmds.button(label="Random → All Meshes", height=26, c=_on_random_all,
                 ann="シーンの全メッシュに互いに見分けやすい色を振る")
     cmds.setParent("..")
+
+    # **掛け方。** レンダーセットアップは割り当てを触らないので、フェース単位で
+    # マテリアルが分かれたモデルを壊さない。 旧方式は逃げ道として残してある
+    usable = renderlayer.available()
+    _CTRL["mode"] = cmds.radioButtonGrp(
+        label="掛け方", numberOfRadioButtons=2,
+        labelArray2=("レンダーレイヤー", "シェーダー差し替え"),
+        columnWidth3=(44, 132, 132), enable1=usable,
+        select=1 if _mode() == _MODE_LAYER else 2,
+        changeCommand=_on_mode_changed,
+        annotation=("レンダーレイヤー: マテリアルの割り当てを触らない。\n"
+                    "  フェース単位で分かれたモデルでも壊さない（推奨）\n"
+                    "シェーダー差し替え: 割り当てを直接書き換える。\n"
+                    "  フェース単位の割り当ては失われる"))
 
     cmds.separator(h=8, style="in")
 
