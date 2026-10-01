@@ -1,7 +1,7 @@
 # Color Override
 
 ## 概要
-- バージョン: 1.0.1 / 対応Maya: 2024+
+- バージョン: 1.0.2 / 対応Maya: 2024+
 - 選択したオブジェクトを任意の色でフラットに塗り分け、**同じような色の
   オブジェクトの貫通（めり込み）をビューポートで見分けられるようにする**。
   元のマテリアル割り当ては記録してあるので、いつでも戻せる。
@@ -160,14 +160,30 @@ color_override.diagnose()
 （`objectGrpCompList`）の**生の戻り値**が出ます。 途中で失敗しても
 `<ERROR ...>` と値にして続けるので、必ず最後まで出ます。
 
-**レンダーセットアップ方式（v1.0.0 予定）の下調べ**はこちら。 既定では
-シーンを一切変更しません。
+**レンダーセットアップ方式の下調べ**はこちら。 既定ではシーンを一切
+変更しません。
 
 ```python
 color_override.probe_render_setup()              # 調べるだけ（安全）
 color_override.probe_render_setup(try_it=True)   # 実際に掛けてみる
 color_override.probe_render_setup(cleanup=True)  # 試した分を片付ける
 ```
+
+**Render Setup ウィンドウでコレクションのメンバーが取り消し線＋灰色に
+なっているとき**は `probe_members()`。 取り消し線は Maya が**その名前を
+シーンのオブジェクトに解決できていない**印なので、同じオブジェクトを
+5 つの形（フルパス／部分パス／ショートネーム／名前空間なし／シェイプ）で
+渡して、**どれが生き残るかを実機に選ばせます**。
+
+```python
+color_override.probe_members()              # 読むだけ（安全）
+color_override.probe_members(try_it=True)   # 5 つの形を試す
+color_override.probe_members(cleanup=True)  # 試した分を片付ける
+```
+
+`try_it=True` のあと Render Setup ウィンドウを見て、**取り消し線が付いて
+いないコレクション**（名前に `long` / `partial` / `short` / `basename` /
+`shape` / `local` が入っています）を教えてください。
 
 Apply したときの完了ログも手掛かりになります。
 

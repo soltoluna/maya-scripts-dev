@@ -42,7 +42,7 @@
 from __future__ import annotations
 
 # 先に定義する（サブモジュールが `from . import __version__` で参照するため）
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 # シェルフボタンに出す短い名前（10 文字以内）。 ハブ `install.py` がここを読んで
 # ボタンを貼る。 **表示名であってツール名ではない**ので接頭辞は付けない
@@ -66,7 +66,7 @@ from . import renderlayer  # noqa: E402  レンダーセットアップ越しの
 from . import dev_tools  # noqa: E402  バージョン表示 / GitHub から更新
 from . import ui        # noqa: E402  cmds による UI
 
-__all__ = ["show", "toggle", "diagnose", "probe_render_setup",
+__all__ = ["show", "toggle", "diagnose", "probe_render_setup", "probe_members",
            "core", "ui", "renderlayer", "dev_tools", "__version__",
            "NAMESPACE", "SHELF_LABEL"]
 
@@ -100,6 +100,21 @@ def probe_render_setup(try_it=False, cleanup=False):
         color_override.probe_render_setup(cleanup=True)  # 試した分を片付ける
     """
     return ui.probe_render_setup(try_it=try_it, cleanup=cleanup)
+
+
+def probe_members(try_it=False, cleanup=False):
+    """静的選択に渡す名前の形を実機で突き合わせる（v1.0.2 の調査）。
+
+    レンダーレイヤーのコレクションで名前が取り消し線になるのは、Render Setup
+    が**その名前をシーンのノードに解決できていない**印。 どの形なら解決
+    できるのかを推測で決めないために、同じオブジェクトを 5 つの形で渡して
+    どれが生き残るかを見る。
+
+        color_override.probe_members()              # 読むだけ（安全）
+        color_override.probe_members(try_it=True)   # 5 つの形を試す
+        color_override.probe_members(cleanup=True)  # 試した分を片付ける
+    """
+    return ui.probe_members(try_it=try_it, cleanup=cleanup)
 
 
 def toggle():

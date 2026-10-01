@@ -855,6 +855,60 @@ class RenderSetupProbeCase(unittest.TestCase):
                 self.module.NAMESPACE + "_"))
 
 
+class NameFormProbeCase(unittest.TestCase):
+    """名前の形の突き合わせ（v1.0.2）。
+
+    **ここが実機で途中で落ちると、出力が出ず往復が 1 回むだになる。**
+    開発機では `maya.app.renderSetup` が無い経路しか通らないが、
+    「無い環境でも最後まで出して終わる」ことだけは押さえられる。
+    """
+
+    def setUp(self):
+        _bootstrap.reset_registry()
+        self.module = _bootstrap.reload_tool()
+        self.ui = self.module.ui
+
+    def test_it_is_exposed_on_the_package(self):
+        self.assertTrue(callable(getattr(self.module, "probe_members", None)))
+        self.assertIn("probe_members", self.module.__all__)
+
+    def test_looking_only_does_not_touch_the_scene(self):
+        """**既定はシーンを一切変更しない。**"""
+        _bootstrap.set_selection(["|anm:pCube1"])
+        self.module.probe_members()
+        touched = [name for name, _a, _k in _bootstrap.CALLS
+                   if name in ("shadingNode", "setAttr", "connectAttr",
+                               "delete", "polyCube", "sets")]
+        self.assertEqual(touched, [])
+
+    def test_it_does_not_raise_with_a_selection(self):
+        _bootstrap.set_selection(["|anm:pCube1"])
+        self.module.probe_members(try_it=True)
+
+    def test_trying_without_a_selection_is_a_no_op(self):
+        _bootstrap.set_selection([])
+        self.module.probe_members(try_it=True)
+
+    def test_cleanup_does_not_raise(self):
+        self.module.probe_members(cleanup=True)
+
+    def test_every_form_has_a_color(self):
+        """形を足して色を忘れると、その形だけ `KeyError` で止まる。"""
+        for key in self.ui._PROBE_FORMS:
+            self.assertIn(key, self.ui._PROBE_COLORS)
+        self.assertIn("local", self.ui._PROBE_COLORS)
+
+    def test_the_forms_differ(self):
+        """**5 つの形が実際に違う文字列になること。**
+
+        同じになる形があると、実機で「どれが効いたか」を見分けられない。
+        """
+        forms = self.ui._name_forms("|anm:pCube1")
+        self.assertEqual(forms["long"], "|anm:pCube1")
+        self.assertEqual(forms["basename"], "pCube1")
+        self.assertNotEqual(forms["long"], forms["basename"])
+
+
 class _FakeRenderSetup(object):
     """`renderlayer` の差し替え。 **呼ばれた内容だけを記録する。**
 

@@ -1993,10 +1993,13 @@ def _probe_cleanup():
             if _safe(layer.name) == name:
                 _delete_render_layer(instance, layer)
 
-    for node in (name + "_SHD", name + "_SG"):
-        if cmds.objExists(node):
-            cmds.delete(node)
-            print("    deleted            : %s" % (node,))
+    # **接頭辞で一括して消す。** 調査が増えるたびに消す名前を並べ直すと
+    # 必ず漏れる（v0.9.1 の片付けが残骸を出したのがこれ）
+    for node in (_listed(_safe(cmds.ls, name + "*")) or []):
+        if not isinstance(node, str) or node.startswith("<"):
+            continue
+        if _safe(cmds.objExists, node) is True:
+            print("    delete(%s): %r" % (node, _safe(cmds.delete, node)))
     print("  片付け完了。 Render Setup ウィンドウに残っていないか確認を。")
 
 
@@ -2034,6 +2037,255 @@ def probe_render_setup(try_it=False, cleanup=False):
     else:
         print("")
         print("  実際に掛けてみる: color_override.probe_render_setup(try_it=True)")
+    print("=" * 60)
+
+
+# --------------------------------------------------------------------------- #
+# 静的選択に渡す名前の形を確かめる（v1.0.2 の調査）
+# --------------------------------------------------------------------------- #
+#
+# v1.0.1 でも「レンダーレイヤーに入っているものが**全部取り消し線＋灰色**」と
+# いう報告が出た。 Render Setup の取り消し線は**その名前をシーンのノードに
+# 解決できていない**印なので、`setStaticSelection` に渡している名前の形が
+# 違う（例外は出ないので、こちらからは成功して見える）。
+#
+# **どの形が正しいかを推測で決めない。** 同じオブジェクトを 5 つの形で 5 つの
+# コレクションに渡し、**どれが生き残るかを実機で見る**。 報告は「取り消し線が
+# 付いていないのはどれか」の 1 行で済む。
+
+# 渡しうる名前の形。 コレクション名に入れるので、見ただけでどれか分かる
+_PROBE_FORMS = ("long", "partial", "short", "basename", "shape")
+
+# 形ごとの色。 ビューポートでどれが効いたかも分かるようにする
+_PROBE_COLORS = {
+    "long":     (1.0, 0.0, 0.0),    # 赤    v1.0.1 が渡している形
+    "partial":  (0.0, 1.0, 0.0),    # 緑
+    "short":    (0.0, 0.4, 1.0),    # 青
+    "basename": (1.0, 1.0, 0.0),    # 黄    名前空間を外した形
+    "shape":    (1.0, 0.0, 1.0),    # マゼンタ  v1.0.0 が渡していた形
+    "local":    (1.0, 1.0, 1.0),    # 白    参照でないローカルの比較用
+}
+
+# 引数なしで呼べる getter。 **解決済みの名前を返すものが見つかれば、
+# 次からは目視せずにプログラムで判定できる**
+_SELECTOR_GETTERS = (
+    "getStaticSelection", "getAbsoluteNames", "getPattern", "getFilterType",
+    "getTypeFilters", "getCustomFilterValue", "names", "asList", "size",
+    "isEmpty", "getIncludeHierarchy", "hasFilterType",
+)
+
+
+def _name_forms(node):
+    """1 つのノードを、静的選択に渡しうる 5 つの形にする。"""
+    long_name = (_listed(_safe(cmds.ls, node, long=True)) or [node])[0]
+    partial = (_listed(_safe(cmds.ls, node)) or [node])[0]
+    short = core.short_name(str(long_name))
+    shapes = _listed(_safe(_shapes_of, node))
+    return {
+        "long": str(long_name),          # |anm:pCube1
+        "partial": str(partial),         # anm:pCube1
+        "short": short,                  # anm:pCube1（パスの末尾）
+        "basename": short.rsplit(":", 1)[-1],   # pCube1（名前空間なし）
+        "shape": str(shapes[0]) if shapes else str(long_name),
+    }
+
+
+def _dump_selector(selector, indent):
+    """セレクタが抱えているものを洗い出す（**引数なしの getter だけ**）。"""
+    print("%sselector        : %r" % (indent, selector))
+    print("%s  methods       : %r" % (indent, _public_names(selector)))
+    for name in _SELECTOR_GETTERS:
+        func = getattr(selector, name, None)
+        if not callable(func):
+            continue
+        print("%s  %-22s -> %r" % (indent, name + "()", _safe(func)))
+
+    # `staticSelection` がオブジェクトとして露出している場合もある
+    static = getattr(selector, "staticSelection", None)
+    if static is None:
+        return
+    print("%s  staticSelection : %r" % (indent, static))
+    print("%s    methods       : %r" % (indent, _public_names(static)))
+    for name in ("asList", "names", "size", "isEmpty", "getAbsoluteNames"):
+        func = getattr(static, name, None)
+        if callable(func):
+            print("%s    %-20s -> %r" % (indent, name + "()", _safe(func)))
+
+
+def _dump_collections(layer_name):
+    """レイヤーが抱えているコレクションを全部出す（**手で作った分も出る**）。
+
+    手でアウトライナーから追加したコレクションがあれば、**Maya 自身が
+    どの形で名前を保持するか**がそこに出る。 それが答えそのもの。
+    """
+    layer = _safe(_layer_call, renderlayer.find_layer, layer_name)
+    print("    layer %-26s : %r" % (layer_name, layer))
+    if layer is None or isinstance(layer, str):
+        return
+    collections = _safe(layer.getCollections)
+    if not isinstance(collections, (list, tuple)):
+        print("      getCollections() : %r" % (collections,))
+        return
+    for collection in collections:
+        print("      COL %r" % (_safe(getattr(collection, "name", None)),))
+        print("        selfEnabled   : %r"
+              % (_safe(getattr(collection, "isSelfEnabled", None)),))
+        selector = _safe(getattr(collection, "getSelector", None))
+        if not isinstance(selector, str):
+            _dump_selector(selector, "        ")
+
+
+def _probe_members_report():
+    """**シーンを触らずに**、いま入っている名前と選択物の形を出す。"""
+    print("-" * 60)
+    print("  いまシーンにあるコレクション")
+    for layer_name in (_LAYER_NAME, _NS + _PROBE_SUFFIX):
+        _dump_collections(layer_name)
+
+    nodes = _selected_objects()
+    print("-" * 60)
+    print("  選択 : %r" % (nodes,))
+    for node in nodes[:3]:
+        forms = _name_forms(node)
+        print("    %s" % (node,))
+        for key in _PROBE_FORMS:
+            print("      %-9s : %-40r exists=%r"
+                  % (key, forms[key], _safe(cmds.objExists, forms[key])))
+        # **参照かどうかの切り分け。** 参照ノードだから解決できないのかを見る
+        print("      referenced: %r"
+              % (_safe(cmds.referenceQuery, node, isNodeReferenced=True),))
+        print("      parent    : %r"
+              % (_safe(cmds.listRelatives, node, parent=True, fullPath=True),))
+
+
+def _probe_members_try():
+    """**同じオブジェクトを 5 つの形で 5 つのコレクションに渡す。**
+
+    どれが解決されるかを実機で見るためのもの。 併せて**参照でないローカルの
+    cube** も作って入れる（「参照だから効かない」のかを切り分ける）。
+    """
+    nodes = _selected_objects()
+    if not nodes:
+        print("  try_it: **1 つ選んでから**実行してください（先頭だけ使います）")
+        return
+    node = nodes[0]
+    forms = _name_forms(node)
+
+    render_setup = _import(_RENDER_SETUP_MODULES[0])
+    type_ids = _import(_RENDER_SETUP_MODULES[1])
+    if isinstance(render_setup, str) or isinstance(type_ids, str):
+        print("  try_it: レンダーセットアップを import できないので中止")
+        return
+
+    base = _NS + _PROBE_SUFFIX
+    instance = _safe(render_setup.instance)
+    layer = _safe(instance.createRenderLayer, base)
+    print("-" * 60)
+    print("  try_it: %r を 5 つの形で渡す -> layer %r" % (node, base))
+    if isinstance(layer, str):
+        print("    createRenderLayer : %r" % (layer,))
+        return
+
+    # **参照でないローカルの比較対象。** これだけ効くなら原因は参照
+    local = _listed(_safe(cmds.polyCube, name=base + "_localCube"))
+    local_name = ""
+    if local and isinstance(local[0], str) and not local[0].startswith("<"):
+        local_name = (_listed(_safe(cmds.ls, local[0], long=True))
+                      or [local[0]])[0]
+        _safe(cmds.setAttr, local[0] + ".translateX", 10.0)
+    print("    local cube        : %r" % (local_name,))
+
+    trials = [(key, forms[key]) for key in _PROBE_FORMS]
+    if local_name:
+        trials.append(("local", str(local_name)))
+
+    for key, value in trials:
+        name = "%s_%s" % (base, key)
+        print("    [%s] %r" % (key, value))
+
+        collection = _safe(layer.createCollection, name + "_COL")
+        if isinstance(collection, str):
+            print("      createCollection : %r" % (collection,))
+            continue
+        selector = _safe(collection.getSelector)
+        print("      setStaticSelection -> %r"
+              % (_safe(selector.setStaticSelection, [value]),))
+        # **渡した直後に読み返す。** ここで何が返るかが、取り消し線の正体
+        print("      読み返し          : %r"
+              % (_safe(getattr(selector, "getStaticSelection", None)),))
+        for getter in ("getAbsoluteNames", "names", "asList"):
+            func = getattr(selector, getter, None)
+            if callable(func):
+                print("      %-17s -> %r" % (getter + "()", _safe(func)))
+
+        rgb = _PROBE_COLORS[key]
+        shader = _safe(cmds.shadingNode, "surfaceShader", asShader=True,
+                       name=name + "_SHD")
+        _safe(cmds.setAttr, str(shader) + ".outColor", rgb[0], rgb[1], rgb[2],
+              type="double3")
+        engine = _safe(cmds.sets, name=name + "_SG", renderable=True,
+                       noSurfaceShader=True, empty=True)
+        _safe(cmds.connectAttr, str(shader) + ".outColor",
+              str(engine) + ".surfaceShader", force=True)
+        override = _safe(collection.createOverride, name + "_mat",
+                         getattr(type_ids, "materialOverride", None))
+        if isinstance(override, str):
+            print("      createOverride   : %r" % (override,))
+            continue
+        print("      setMaterial       -> %r"
+              % (_safe(override.setMaterial, engine),))
+
+    print("    switchToLayer     : %r"
+          % (_safe(instance.switchToLayer, layer),))
+    print("")
+    print("  **Render Setup ウィンドウを開いて、次の 2 つを教えてください。**")
+    print("    1. 取り消し線が付いて**いない**コレクションはどれか")
+    print("       （コレクション名に long / partial / short / basename /")
+    print("        shape / local が入っています）")
+    print("    2. ビューポートでどの色が乗ったか")
+    print("       赤=long  緑=partial  青=short  黄=basename")
+    print("       マゼンタ=shape  白=ローカルの比較用 cube")
+    print("    3. 選んだオブジェクト以外がビューポートに見えているか")
+    print("")
+    print("  片付け: color_override.probe_members(cleanup=True)")
+
+
+def probe_members(try_it=False, cleanup=False):
+    """**静的選択に渡す名前の形を実機で突き合わせる。**
+
+    v1.0.1 でも「レンダーレイヤーに入っているものが全部取り消し線＋灰色」に
+    なった。 取り消し線は Render Setup が**その名前をシーンのノードに解決
+    できていない**印で、`setStaticSelection` は例外を出さないので
+    こちらからは成功して見える。
+
+        import color_override
+        color_override.probe_members()              # 読むだけ（安全）
+        color_override.probe_members(try_it=True)   # 5 つの形を試す
+        color_override.probe_members(cleanup=True)  # 試した分を片付ける
+
+    `try_it=False` は**シーンを一切変更しない**。 色を掛けたままのシーンで
+    実行すれば、いま入っている名前がそのまま出る。
+
+    **手で Render Setup ウィンドウからコレクションを作ってオブジェクトを
+    入れたシーンで `probe_members()` を実行すると、Maya 自身がどの形で名前を
+    保持するかが出る。** それが答えそのものなので、もし手で作った分が
+    残っているなら、その状態で実行してほしい。
+    """
+    print("=" * 60)
+    print("[%s] probe_members  v%s" % (_PACKAGE, __version__))
+    print("  maya    : %s" % (_safe(cmds.about, version=True),))
+
+    if cleanup:
+        _probe_cleanup()
+        print("=" * 60)
+        return
+
+    _probe_members_report()
+    if try_it:
+        _probe_members_try()
+    else:
+        print("")
+        print("  5 つの形を試す: color_override.probe_members(try_it=True)")
     print("=" * 60)
 
 
