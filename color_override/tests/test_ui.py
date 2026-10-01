@@ -876,6 +876,20 @@ class _FakeRenderSetup(object):
     def available(self):
         return True
 
+    def scene_nodes(self):
+        return ["|a", "|b"]
+
+    def ensure_scene_collection(self, layer, name, nodes=None):
+        """土台のコレクション（シーン全体を抱えるだけ・色は掛けない）。"""
+        self._log("ensure_scene_collection", layer, name)
+        self.collections[name] = {
+            "nodes": list(nodes) if nodes is not None else self.scene_nodes(),
+            "enabled": True, "base": True}
+        return name
+
+    def find_collection(self, layer, name):
+        return self.collections.get(name)
+
     def create_collection(self, layer, name, nodes, engine):
         self._log("create_collection", layer, name, tuple(nodes), engine)
         if self.fail:
@@ -904,8 +918,10 @@ class _FakeRenderSetup(object):
         self.collections.pop(name, None)
         return True
 
-    def collection_count(self, layer):
-        return len(self.collections)
+    def collection_count(self, layer, ignore=()):
+        """**色の**コレクションの数（土台は数えない）。"""
+        skip = set(ignore or ())
+        return len([name for name in self.collections if name not in skip])
 
     def layer_is_visible(self, layer):
         return self.visible
@@ -945,6 +961,12 @@ class RenderLayerModeCase(unittest.TestCase):
         cmds.objExists = lambda *a, **k: True
         self.addCleanup(lambda: delattr(cmds, "objExists"))
 
+        # **シェイプ → 親トランスフォーム。** コレクションに渡すのは
+        # トランスフォームでなければならない（v1.0.1）。 スタブの既定では
+        # 区別が付かないので、ここだけ本物に近い戻り値を与える
+        cmds.listRelatives = lambda name, **k: [str(name).rsplit("|", 1)[0]]
+        self.addCleanup(lambda: delattr(cmds, "listRelatives"))
+
     def _apply(self, node=SHAPE):
         records, index = [], {}
         self.records = records
@@ -964,12 +986,58 @@ class RenderLayerModeCase(unittest.TestCase):
         self.assertEqual(self._force_element_calls(), [],
                          "割り当てを書き換えている")
 
-    def test_it_creates_a_collection_for_the_shapes(self):
+    def test_it_creates_a_collection_for_the_transform(self):
+        """**シェイプではなくトランスフォームを渡す。**
+
+        v1.0.0 はシェイプを渡していて、実機では**レイヤーのメンバーとして
+        効かず対象がビューポートから消えた**（2026-10-01 報告）。
+        記録はシェイプのまま、レイヤーに渡す形だけ変える。
+        """
         self._apply()
         created = [call for call in self.fake.calls
                    if call[0] == "create_collection"]
         self.assertEqual(len(created), 1)
-        self.assertEqual(created[0][3], (self.SHAPE,))
+        self.assertEqual(created[0][3], ("|a",))
+
+    def test_the_layer_holds_the_whole_scene(self):
+        """**塗っていないものを消さない。**
+
+        レンダーレイヤーはコレクションに入っていないものをビューポートから
+        消すので、オーバーライドを持たない土台が無いと「塗った物以外が
+        消えたシーン」になる（2026-10-01 報告）。
+        """
+        self._apply()
+        self.assertIn(("ensure_scene_collection", self.ui._LAYER_NAME,
+                       self.ui._SCENE_COLLECTION), self.fake.calls)
+
+    def test_the_scene_is_pushed_once_per_run(self):
+        """**同じ一覧を渡し直さない。**
+
+        `Random → All Meshes` は対象ごとにここを通る。 毎回シーン全体を
+        渡すと掛かる時間がオブジェクト数の 2 乗で伸びる。
+        """
+        self.ui._ensure_scene_in_layer()
+        self.ui._ensure_scene_in_layer()
+        pushed = [call for call in self.fake.calls
+                  if call[0] == "ensure_scene_collection"]
+        self.assertEqual(len(pushed), 1)
+
+    def test_the_scene_is_pushed_again_when_the_base_is_gone(self):
+        """シーンを開き直すとレイヤーごと消える。 控えだけ残っていても作り直す。"""
+        self.ui._ensure_scene_in_layer()
+        self.fake.collections.pop(self.ui._SCENE_COLLECTION, None)
+        self.ui._ensure_scene_in_layer()
+        pushed = [call for call in self.fake.calls
+                  if call[0] == "ensure_scene_collection"]
+        self.assertEqual(len(pushed), 2)
+
+    def test_the_base_collection_is_not_counted_as_a_color(self):
+        """土台を数に入れると、全部戻してもレイヤーが残る。"""
+        self.fake.ensure_scene_collection(self.ui._LAYER_NAME,
+                                         self.ui._SCENE_COLLECTION)
+        self.assertEqual(
+            self.fake.collection_count(self.ui._LAYER_NAME,
+                                       (self.ui._SCENE_COLLECTION,)), 0)
 
     def test_the_collection_name_is_written_to_the_shader(self):
         """記録の情報源はシーン側。 開き直しても戻せるようにする。"""
@@ -1043,8 +1111,10 @@ class RenderLayerModeCase(unittest.TestCase):
         records = [record]
         index = core.index_by_object(records)
         self.ui._release_members(records, index, [self.SHAPE])
+        # 差し替えもトランスフォームで渡す（記録側はシェイプのまま）
         self.assertIn(("set_collection_members", self.ui._LAYER_NAME, "col",
-                       ("|b|bShape",)), self.fake.calls)
+                       ("|b",)), self.fake.calls)
+        self.assertEqual(record["members"], ["|b|bShape"])
 
 
 class ModeCase(unittest.TestCase):

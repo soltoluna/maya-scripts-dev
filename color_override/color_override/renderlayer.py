@@ -28,6 +28,21 @@ v0.5.0〜v0.9.2 は対象の shadingEngine を直接差し替えていた。 掛
   （`RenderLayer` 自体に削除メソッドは無い）
 - 元の表示レイヤーは `rs.getVisibleRenderLayer()` で覚えて戻せる
 
+## レイヤーのメンバー（**2026-10-01 に実機で判明。 v1.0.1 で対応**）
+
+v1.0.0 は「アプライするとビューポートから消える」。 原因は 2 つあり、
+**どちらもコレクションのメンバーの渡し方**だった。
+
+1. **シェイプを渡すとメンバーとして効かない。** `setStaticSelection` に
+   `|anm:pCube1|anm:pCubeShape1` を渡すと、Render Setup ウィンドウには
+   並ぶのにレイヤーには入らない。 **トランスフォームを渡す**
+   （実機で色が出た `probe_render_setup(try_it=True)` は選択物、つまり
+   トランスフォームを渡していた。 v1.0.0 だけがシェイプに変えてしまった）
+2. **レイヤーはコレクションに入っていないものをビューポートから消す。**
+   色のコレクションだけでは「塗った物以外が消えたシーン」になる。
+   オーバーライドを持たない土台のコレクションでシーン全体を抱える
+   （`ensure_scene_collection`）
+
 ## 方針
 
 - **import は関数の中で行う。** `maya.app.renderSetup` が無い / 無効な環境でも
@@ -188,11 +203,60 @@ def layer_is_visible(name):
 # コレクション（= 1 つの色の掛かり）
 # --------------------------------------------------------------------------- #
 
+def scene_nodes():
+    """レイヤーに「シーン全体」を入れるためのノード一覧。
+
+    **トランスフォームを渡す。** シェイプだけではレイヤーのメンバーとして
+    効かない（v1.0.0 の不具合。 下の `ensure_scene_collection` 参照）。
+    """
+    return cmds.ls(dag=True, transforms=True, long=True) or []
+
+
+def ensure_scene_collection(layer_name, collection_name, nodes=None):
+    """**シーン全体を抱えるだけ**のコレクションを用意する（色は掛けない）。
+
+    レンダーセットアップのレイヤーは、**コレクションに入っていないものを
+    ビューポートから消す**。 色のコレクションしか無いと、掛けた瞬間に
+    「塗った物以外が全部消えたシーン」になってしまう（v1.0.0 の不具合。
+    報告は「アプライするとビューから消える」）。
+
+    そこでオーバーライドを持たない土台のコレクションを 1 つ置き、レイヤーの
+    メンバーをシーン全体にしておく。 オーバーライドが無いので、ここに
+    入れること自体は何の変化も起こさない。
+
+    **パターン（`*`）ではなく静的選択で渡す。** 実機で通ることを確認できて
+    いるのは `setStaticSelection` だけで、パターンが効かなかったときに
+    「何も見えない」に戻ってしまう。 代わりに**掛けるたび・表示するたびに
+    呼び直して**、後から作られたものを取り込む。
+    """
+    layer = ensure_layer(layer_name)
+    collection = find_collection(layer_name, collection_name)
+    if collection is None:
+        try:
+            collection = layer.createCollection(collection_name)
+        except Exception as exc:
+            raise RenderSetupError("土台のコレクションを作れません: %s" % (exc,))
+    try:
+        collection.getSelector().setStaticSelection(
+            list(nodes) if nodes is not None else scene_nodes())
+    except Exception as exc:
+        raise RenderSetupError("シーン全体を渡せません: %s" % (exc,))
+    try:
+        return collection.name()
+    except Exception:
+        return collection_name
+
+
 def create_collection(layer_name, collection_name, nodes, shading_engine):
     """対象にマテリアルオーバーライドを掛けるコレクションを作る。
 
     `shading_engine` は**シェーダーではなく shadingEngine**。
     `MaterialOverride.setShader` は存在しない（実機で確認済み）。
+
+    `nodes` は**シェイプではなくトランスフォーム**を渡す（v1.0.1）。
+    シェイプを渡すとレイヤーのメンバーとして効かず、対象がビューポートから
+    消える。 2026-09-17 に実機で色が出た `probe_render_setup(try_it=True)` が
+    渡していたのも選択物（＝トランスフォーム）だった。
 
     作ったコレクションのノード名を返す（Maya が名前を変えることがあるので、
     指定した名前ではなく**実際の名前**を控える）。
@@ -253,15 +317,29 @@ def delete_collection(layer_name, collection_name):
     return True
 
 
-def collection_count(layer_name):
-    """レイヤーが抱えているコレクションの数。"""
+def collection_count(layer_name, ignore=()):
+    """レイヤーが抱えている**色の**コレクションの数。
+
+    `ignore` に土台のコレクション（`ensure_scene_collection`）を渡す。
+    **土台を数に入れると 0 にならず、全部戻してもレイヤーが残る。**
+    """
     layer = find_layer(layer_name)
     if layer is None:
         return 0
+    skip = set(ignore or ())
     try:
-        return len(layer.getCollections() or [])
+        collections = layer.getCollections() or []
     except Exception:
         return 0
+    count = 0
+    for collection in collections:
+        try:
+            name = collection.name()
+        except Exception:
+            name = ""
+        if name not in skip:
+            count += 1
+    return count
 
 
 def set_collection_enabled(layer_name, collection_name, enabled):

@@ -127,6 +127,16 @@ _OPTVAR_MODE = _NS + "_mode"
 # シーンに作るレンダーセットアップのレイヤー名。 1 本だけ使い回す
 _LAYER_NAME = _NS
 
+# 土台のコレクション名。 **オーバーライドを持たず、シーン全体を抱えるだけ。**
+# レイヤーはコレクションに入っていないものをビューポートから消すので、これが
+# 無いと「塗った物以外が消えたシーン」になる（v1.0.1 で追加）
+_SCENE_COLLECTION = _NS + "_scene_COL"
+
+# 土台へ最後に渡した一覧。 **同じなら渡し直さない**（対象ごとに渡していると
+# `Random → All Meshes` の時間がオブジェクト数の 2 乗で伸びる）。
+# シーンに属する状態ではないので optionVar には持たない
+_SCENE_PUSHED = {"nodes": None}
+
 # こちらが表示を奪う前に出ていたレイヤー。 戻すときにここへ帰す
 # （実作業のレンダーレイヤーがあるシーンで表示を奪ったままにしない）
 _OPTVAR_PREV_LAYER = _NS + "_prev_layer"
@@ -337,8 +347,11 @@ def _collect_records():
         # そちらは割り当てを触っていないので、戻し先の控えを一切見ない
         collection = _read_attr(shader, _ATTR_COLLECTION)
         if collection:
-            live = (_layer_call(renderlayer.collection_members,
-                                _LAYER_NAME, collection) or stored)
+            # **コレクションのメンバーは見ない。** 向こうが抱えているのは
+            # トランスフォーム（レイヤーのメンバーとして効くのがそれだけ）で、
+            # こちらの記録はシェイプで突き合わせる。 混ぜると
+            # Restore Selected が当たらなくなる（v1.0.1）
+            live = stored
             enabled = bool(
                 _layer_call(renderlayer.collection_is_enabled,
                             _LAYER_NAME, collection)
@@ -705,8 +718,12 @@ def _release_members(records, index, shapes):
 
         if keep:
             if record.get("collection"):
+                # **レイヤーにはトランスフォームを渡す**（シェイプでは
+                # メンバーとして効かない）。 記録側はシェイプのまま
                 _layer_call(renderlayer.set_collection_members, _LAYER_NAME,
-                            record["collection"], keep)
+                            record["collection"],
+                            _layer_targets(record.get("target") or keep[0],
+                                           keep))
                 _write_string(record["shader"], _ATTR_MEMBERS,
                               core.join_members(keep))
             else:
@@ -830,6 +847,57 @@ def _make_override_shader(node, rgb):
     return (shader, shading_engine)
 
 
+def _layer_targets(node, shapes):
+    """レンダーセットアップのコレクションに渡すノード（トランスフォーム）。
+
+    **シェイプを渡してはいけない。** コレクションの静的選択にシェイプを
+    入れてもレイヤーのメンバーにならず、対象がビューポートから消える
+    （v1.0.0 の不具合。 詳細は `renderlayer.py` の「レイヤーのメンバー」）。
+
+    記録側は今までどおり**シェイプ**を抱える（1 シェイプ = 1 記録の突き合わせが
+    シェイプ名で成り立っているため）。 ここで作るのは「レイヤーに渡す形」だけ。
+    """
+    targets = []
+    for shape in shapes:
+        # `_listed` を通す。 1 件のとき文字列が返る経路があり、そのまま
+        # `extend` すると**文字が 1 つずつ入る**
+        parents = _listed(cmds.listRelatives(shape, parent=True,
+                                             fullPath=True))
+        targets.extend(parents or [shape])
+    return core.unique(targets) or [node]
+
+
+def _ensure_scene_in_layer():
+    """土台のコレクションを最新にする（レイヤーのメンバー = シーン全体）。
+
+    **掛けるたび・表示するたびに呼ぶ。** 静的選択なので、後から作られた
+    オブジェクトは呼び直さないと入らない。
+
+    **一覧が前回と同じなら渡し直さない。** `Random → All Meshes` は対象 1 つ
+    ごとにここを通るので、毎回シーン全体を渡すと掛かる時間がオブジェクト数の
+    2 乗で伸びる。 `cmds.ls` だけは毎回引く（安いほうで差分を見る）。
+    """
+    nodes = renderlayer.scene_nodes()
+    # 控えが合っていても、**土台そのものが無くなっていれば作り直す**
+    # （シーンを開き直すとレイヤーごと消えている）
+    if (nodes and nodes == _SCENE_PUSHED.get("nodes")
+            and _layer_call(renderlayer.find_collection, _LAYER_NAME,
+                            _SCENE_COLLECTION) is not None):
+        return
+    pushed = _layer_call(renderlayer.ensure_scene_collection, _LAYER_NAME,
+                         _SCENE_COLLECTION, nodes)
+    _SCENE_PUSHED["nodes"] = list(nodes) if pushed else None
+
+
+def _forget_scene_in_layer():
+    """土台を渡し直す必要がある状態になったことを覚える。
+
+    レイヤーやコレクションを消したあとに控えが残っていると、**次に掛けた
+    ときに土台を作り直さず、塗った物以外が消えたままになる。**
+    """
+    _SCENE_PUSHED["nodes"] = None
+
+
 def _apply_one_layer(node, rgb, set_name, shapes, records, index):
     """レンダーセットアップのマテリアルオーバーライドで色を掛ける。
 
@@ -843,11 +911,15 @@ def _apply_one_layer(node, rgb, set_name, shapes, records, index):
     掛かって見えるのは**このレイヤーが表示されている間だけ**なので、
     掛けたら表示を奪う。 奪う前のレイヤーは覚えておいて、全部戻したときに帰す。
     """
+    # **先に土台を置く。** 色のコレクションだけのレイヤーは、塗った物以外を
+    # ビューポートから消してしまう
+    _ensure_scene_in_layer()
+
     shader, shading_engine = _make_override_shader(node, rgb)
     collection = _layer_call(
         renderlayer.create_collection, _LAYER_NAME,
         core.sanitize_identifier(shading_engine) + "_COL",
-        shapes, shading_engine)
+        _layer_targets(node, shapes), shading_engine)
 
     if not collection:
         # 作れなかったらこちらの後始末をしてから引き下がる。 中途半端な
@@ -885,6 +957,9 @@ def _apply_one_layer(node, rgb, set_name, shapes, records, index):
 
 def _show_layer():
     """色のレイヤーを表示する。 **奪う前の表示レイヤーを覚えておく。**"""
+    # 表示中でも呼び直す。 前回の Apply のあとに作られたオブジェクトも
+    # レイヤーに入れておかないと、そのぶんだけ消えて見える
+    _ensure_scene_in_layer()
     if _layer_call(renderlayer.layer_is_visible, _LAYER_NAME):
         return
     previous = _layer_call(renderlayer.show_layer, _LAYER_NAME)
@@ -1146,9 +1221,15 @@ def _restore(records, label, sets=None):
             _delete_override(record)
         # レイヤーが空になったら、レイヤーごと消して元の表示に帰す。
         # **シーンに何も残さない**のがこのツールの方針
-        if _layer_call(renderlayer.collection_count, _LAYER_NAME) == 0:
+        if _layer_call(renderlayer.collection_count, _LAYER_NAME,
+                       (_SCENE_COLLECTION,)) == 0:
             _leave_layer()
+            # 土台も先に外す。 レイヤーだけ消して置き去りにすると
+            # `ntk_color_override_scene_COL` がシーンに残る
+            _layer_call(renderlayer.delete_collection, _LAYER_NAME,
+                        _SCENE_COLLECTION)
             _layer_call(renderlayer.delete_layer, _LAYER_NAME)
+            _forget_scene_in_layer()
 
     _in_undo_chunk(label, _run)
     _refresh_list()
@@ -1646,7 +1727,59 @@ def diagnose():
                           % (plug, _safe(cmds.getAttr,
                                          str(plug) + ".objectGrpCompList")))
             print("    _read_assignment: %r" % (_safe(_read_assignment, shape),))
+    _diagnose_layer(nodes)
     print("=" * 60)
+
+
+def _diagnose_layer(nodes):
+    """レンダーセットアップ側の状態を出す（**シーンは触らない**）。
+
+    v1.0.0 の「アプライするとビューから消える」は、コレクションに**シェイプ**を
+    渡していたのが原因だった。 同じ種類の食い違いを次からは出力だけで
+    見分けられるように、**こちらが渡した名前と Maya が抱えている名前の両方**を出す。
+    """
+    print("-" * 60)
+    print("  render setup")
+    print("    mode          : %r" % (_safe(_mode),))
+    print("    available     : %r" % (_safe(renderlayer.available),))
+    print("    visible layer : %r"
+          % (_safe(_layer_call, renderlayer.visible_layer_name),))
+    print("    layer %-8s: %r"
+          % (_LAYER_NAME,
+             _safe(_layer_call, renderlayer.find_layer, _LAYER_NAME)))
+    print("    color COLs    : %r"
+          % (_safe(_layer_call, renderlayer.collection_count,
+                   _LAYER_NAME, (_SCENE_COLLECTION,)),))
+
+    base = _safe(_layer_call, renderlayer.collection_members,
+                 _LAYER_NAME, _SCENE_COLLECTION)
+    if isinstance(base, (list, tuple)):
+        print("    scene COL     : %d 件  先頭 %r" % (len(base), base[:5]))
+    else:
+        print("    scene COL     : %r" % (base,))
+
+    # **選択物について「渡す形」と「抱えている形」を並べる**
+    for node in nodes:
+        shapes = _safe(_shapes_of, node)
+        if not isinstance(shapes, (list, tuple)):
+            print("    %s: shapes %r" % (node, shapes))
+            continue
+        print("    %s" % (node,))
+        print("      shapes  : %r" % (list(shapes),))
+        print("      targets : %r" % (_safe(_layer_targets, node, shapes),))
+
+    for record in _safe(_collect_records) or []:
+        if not isinstance(record, dict) or not record.get("collection"):
+            continue
+        name = record["collection"]
+        print("    COL %s" % (name,))
+        print("      enabled : %r"
+              % (_safe(_layer_call, renderlayer.collection_is_enabled,
+                       _LAYER_NAME, name),))
+        print("      members : %r"
+              % (_safe(_layer_call, renderlayer.collection_members,
+                       _LAYER_NAME, name),))
+        print("      record  : %r" % (record.get("members"),))
 
 
 # --------------------------------------------------------------------------- #
