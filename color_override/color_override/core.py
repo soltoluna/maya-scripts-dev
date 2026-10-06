@@ -88,6 +88,33 @@ def distinct_colors(count, start_index=0,
     return [color_at(start_index + i, saturation, value) for i in range(count)]
 
 
+def same_color(left, right, tolerance=1.0 / 512.0):
+    """2 つの色が同じと言えるか。
+
+    **`==` で比べない。** 色は `setAttr` → `getAttr` を往復すると float の
+    丸めで最下位が変わる。 一覧の色見本を押したときに「どの記録がこの色か」を
+    突き合わせるので、ここで取りこぼすと押しても何も起きない。
+
+    >>> same_color((1.0, 0.0, 0.0), (1.0, 0.0, 0.0))
+    True
+    >>> same_color((1.0, 0.0, 0.0), (1.0, 0.0, 0.5))
+    False
+    >>> same_color(None, (0.0, 0.0, 0.0))
+    False
+    >>> same_color((0.5, 0.5, 0.5), (0.5001, 0.4999, 0.5))
+    True
+    """
+    if left is None or right is None:
+        return False
+    try:
+        pair = [(float(a), float(b)) for a, b in zip(left, right)]
+    except (TypeError, ValueError):
+        return False
+    if len(pair) < 3:
+        return False
+    return all(abs(a - b) <= tolerance for a, b in pair[:3])
+
+
 def parse_hex(text):
     """`#RRGGBB` / `RRGGBB` を `(r, g, b)`（0.0–1.0）に変換する。
 

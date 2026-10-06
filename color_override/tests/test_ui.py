@@ -298,7 +298,27 @@ class SetRowCase(unittest.TestCase):
                                 "colors": [(1.0, 0.0, 0.0)], "count": 3})
         labels = [kwargs.get("label") for name, _a, kwargs
                   in _bootstrap.CALLS if name == "button"]
-        self.assertEqual(labels, ["Hide", "Sel", "Restore"])
+        self.assertEqual(labels, ["色", "Hide", "Sel", "Restore"])
+
+    def test_an_applied_rows_swatches_can_be_pressed(self):
+        """**色見本を押して色を変えられる。** 掛かっている行だけ。"""
+        self.ui._build_set_row({"name": "hair", "applied": True,
+                                "enabled": True, "records": [], "items": [],
+                                "colors": [(1.0, 0.0, 0.0)], "count": 3})
+        pressable = [kwargs for name, _a, kwargs in _bootstrap.CALLS
+                     if name == "canvas" and kwargs.get("pressCommand")]
+        self.assertEqual(len(pressable), 1)
+
+    def test_a_backup_rows_swatches_are_not_pressable(self):
+        """控えは掛かっていないので、押しても変える先が無い。"""
+        self.ui._build_set_row({"name": "hair", "applied": False,
+                                "enabled": False, "records": [],
+                                "items": [{"target": "|a",
+                                           "color": (1.0, 0.0, 0.0)}],
+                                "colors": [(1.0, 0.0, 0.0)], "count": 1})
+        pressable = [kwargs for name, _a, kwargs in _bootstrap.CALLS
+                     if name == "canvas" and kwargs.get("pressCommand")]
+        self.assertEqual(pressable, [])
 
     def test_a_backup_row_offers_a_restore_button(self):
         """控えに「戻す手段」が見えていること（Apply では復元と読めない）。"""
@@ -853,6 +873,93 @@ class RenderSetupProbeCase(unittest.TestCase):
         self.assertTrue(
             (self.ui._NS + self.ui._PROBE_SUFFIX).startswith(
                 self.module.NAMESPACE + "_"))
+
+
+class RecolorCase(unittest.TestCase):
+    """**掛かっている色を掛け直さずに変える。**
+
+    色はオーバーライド用シェーダーの `outColor` そのものなので、書き換えれば
+    その場で出る。 割り当てもコレクションも触らないので、どちらの掛け方でも
+    同じように効く。
+    """
+
+    def setUp(self):
+        from maya import cmds
+        _bootstrap.reset_registry()
+        self.module = _bootstrap.reload_tool()
+        self.ui = self.module.ui
+        self.cmds = cmds
+        self.ui._refresh_list = lambda *a, **k: None
+
+        self.entry = {
+            "name": "hair", "applied": True, "enabled": True,
+            "colors": [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0)], "count": 2,
+            "items": [],
+            "records": [
+                {"shader": "shd1", "color": (1.0, 0.0, 0.0)},
+                {"shader": "shd2", "color": (0.0, 1.0, 0.0)},
+            ],
+        }
+        self.ui._find_set = lambda name: (self.entry
+                                          if name == "hair" else None)
+
+    def _accept(self, rgb):
+        """カラーエディタで OK が押された状態にする。"""
+        def _editor(*_args, **kwargs):
+            if kwargs.get("query") or kwargs.get("q"):
+                if kwargs.get("result"):
+                    return 1
+                return list(rgb) + [1.0]
+            return ""
+        self.cmds.colorEditor = _editor
+        self.addCleanup(lambda: delattr(self.cmds, "colorEditor"))
+
+    def _colors_written(self):
+        return [(args[0], tuple(args[1:4])) for name, args, _k
+                in _bootstrap.CALLS
+                if name == "setAttr" and len(args) >= 4
+                and str(args[0]).endswith(".outColor")]
+
+    def test_the_whole_set_changes(self):
+        self._accept((0.0, 0.0, 1.0))
+        self.ui._on_set_recolor("hair")
+        self.assertEqual(self._colors_written(),
+                         [("shd1.outColor", (0.0, 0.0, 1.0)),
+                          ("shd2.outColor", (0.0, 0.0, 1.0))])
+
+    def test_cancelling_changes_nothing(self):
+        """**キャンセルで色が変わってはいけない。** 既定のスタブは取消を返す。"""
+        self.ui._on_set_recolor("hair")
+        self.assertEqual(self._colors_written(), [])
+
+    def test_pressing_one_swatch_changes_only_that_color(self):
+        """`Random →` で振った色を 1 つだけ直せること。"""
+        self._accept((0.0, 0.0, 1.0))
+        self.ui._on_swatch_recolor("hair", (0.0, 1.0, 0.0))
+        self.assertEqual(self._colors_written(),
+                         [("shd2.outColor", (0.0, 0.0, 1.0))])
+
+    def test_it_never_touches_the_assignment(self):
+        """**色を変えるだけ。** 割り当てを触ると元の状態が壊れる。"""
+        self._accept((0.0, 0.0, 1.0))
+        self.ui._on_set_recolor("hair")
+        touched = [name for name, _a, kwargs in _bootstrap.CALLS
+                   if name == "sets" and kwargs.get("forceElement")]
+        self.assertEqual(touched, [])
+
+    def test_a_backup_set_cannot_be_recolored(self):
+        """控えはシーンに掛かっていないので、変える先が無い。"""
+        self._accept((0.0, 0.0, 1.0))
+        self.entry["applied"] = False
+        self.ui._on_set_recolor("hair")
+        self.assertEqual(self._colors_written(), [])
+
+    def test_it_is_one_undo(self):
+        self._accept((0.0, 0.0, 1.0))
+        self.ui._on_set_recolor("hair")
+        chunks = [kwargs for name, _a, kwargs in _bootstrap.CALLS
+                  if name == "undoInfo" and kwargs.get("openChunk")]
+        self.assertEqual(len(chunks), 1)
 
 
 class NameFormProbeCase(unittest.TestCase):

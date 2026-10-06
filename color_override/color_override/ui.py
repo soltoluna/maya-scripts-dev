@@ -1352,6 +1352,85 @@ def _on_set_select(name, *_args):
                      % (_PACKAGE, name))
 
 
+def _pick_color(current):
+    """カラーエディタを開いて色を選ばせる（キャンセルなら `None`）。
+
+    `colorSliderGrp` と違い**どこからでも開ける**ので、一覧の行から呼べる。
+    """
+    cmds.colorEditor(rgbValue=tuple(current)[:3])
+    try:
+        accepted = int(cmds.colorEditor(query=True, result=True) or 0)
+    except (TypeError, ValueError):
+        accepted = 0
+    if not accepted:
+        return None
+    rgb = cmds.colorEditor(query=True, rgbValue=True) or []
+    if len(rgb) < 3:
+        return None
+    return tuple(core.clamp01(value) for value in rgb[:3])
+
+
+def _on_set_recolor(name, *_args):
+    """**掛かっているセットの色を、掛け直さずに変える。**
+
+    色はオーバーライド用シェーダーの `outColor` そのものなので、値を
+    書き換えれば**その場でビューポートに出る**。 割り当ても
+    コレクションも触らないので、レンダーレイヤー方式でも旧方式でも同じ。
+
+    ばらばらの色が付いたセット（`Random →`）に使うと**1 色にまとまる**。
+    まとめたくないときは行の色見本を 1 つずつ押す。
+    """
+    entry = _find_set(name)
+    if entry is None or not entry["applied"]:
+        return
+
+    rgb = _pick_color((entry["colors"] or [_DEFAULT_COLOR])[0])
+    if rgb is None:
+        return
+
+    def _run():
+        for record in entry["records"]:
+            cmds.setAttr(record["shader"] + ".outColor",
+                         rgb[0], rgb[1], rgb[2], type="double3")
+
+    _in_undo_chunk("recolor set", _run)
+    _set_color(rgb)        # 次の Apply でも同じ色が使えるように揃える
+    _refresh_list()
+    print("[%s] recolor set: %s -> %s"
+          % (_PACKAGE, name, core.to_hex(rgb)))
+
+
+def _on_swatch_recolor(name, old_rgb, *_args):
+    """色見本を押したとき。 **その色の分だけ**色を変える。
+
+    `Random →` で振った色を 1 つだけ直したいときのための入口。
+    セット全体をまとめて変えたいなら行の「色」ボタン。
+    """
+    entry = _find_set(name)
+    if entry is None or not entry["applied"]:
+        return
+
+    targets = [record for record in entry["records"]
+               if core.same_color(record.get("color"), old_rgb)]
+    if not targets:
+        return _on_set_recolor(name)
+
+    rgb = _pick_color(old_rgb)
+    if rgb is None:
+        return
+
+    def _run():
+        for record in targets:
+            cmds.setAttr(record["shader"] + ".outColor",
+                         rgb[0], rgb[1], rgb[2], type="double3")
+
+    _in_undo_chunk("recolor", _run)
+    _set_color(rgb)
+    _refresh_list()
+    print("[%s] recolor: %s  %s -> %s"
+          % (_PACKAGE, name, core.to_hex(old_rgb), core.to_hex(rgb)))
+
+
 def _on_set_restore(name, *_args):
     entry = _find_set(name)
     if entry is None or not entry["applied"]:
@@ -1399,10 +1478,13 @@ def _on_set_forget(name, *_args):
 # 一覧
 # --------------------------------------------------------------------------- #
 
-def _build_swatches(colors):
+def _build_swatches(colors, set_name=""):
     """色見本を横に並べる。 **カラーコードではなく色そのものを出す。**
 
     16 進の値はツールチップに残す（必要なときだけ読めればよい）。
+
+    `set_name` を渡すと**押して色を変えられる**（掛かっているセットだけ）。
+    色はシェーダーの `outColor` そのものなので、書き換えればその場で出る。
     """
     shown, overflow = core.swatch_colors(colors, _SWATCH_LIMIT)
     columns = max(len(shown), 1) + (1 if overflow else 0)
@@ -1410,8 +1492,14 @@ def _build_swatches(colors):
     if not shown:
         cmds.text(label="")
     for rgb in shown:
-        cmds.canvas(width=10, height=14, rgbValue=rgb,
-                    annotation=core.to_hex(rgb))
+        swatch = cmds.canvas(
+            width=10, height=14, rgbValue=rgb,
+            annotation=(core.to_hex(rgb) + "（押すとこの色だけ変えられる）")
+            if set_name else core.to_hex(rgb))
+        if set_name:
+            cmds.canvas(swatch, edit=True,
+                        pressCommand=lambda *a, n=set_name, c=tuple(rgb):
+                        _on_swatch_recolor(n, c))
     if overflow:
         cmds.text(label="+%d" % (overflow,), fn="smallPlainLabelFont")
     cmds.setParent("..")
@@ -1421,9 +1509,9 @@ def _build_set_row(entry):
     """一覧の 1 行 = 1 セット。 掛かっているものと控えで持たせる操作が違う。"""
     name = entry["name"]
     if entry["applied"]:
-        cmds.rowLayout(numberOfColumns=6, adjustableColumn=2,
-                       columnWidth6=(98, 110, 50, 46, 40, 62),
-                       columnAlign6=("left", "left", "left",
+        cmds.rowLayout(numberOfColumns=7, adjustableColumn=2,
+                       columnWidth7=(98, 88, 44, 34, 46, 36, 58),
+                       columnAlign7=("left", "left", "left", "center",
                                      "center", "center", "center"))
     else:
         cmds.rowLayout(numberOfColumns=5, adjustableColumn=2,
@@ -1431,7 +1519,8 @@ def _build_set_row(entry):
                        columnAlign5=("left", "left", "left",
                                      "center", "center"))
 
-    _build_swatches(entry["colors"])
+    # 掛かっているセットは色見本を押して色を変えられる
+    _build_swatches(entry["colors"], name if entry["applied"] else "")
 
     field = cmds.textField(text=name,
                            annotation="名前を変えて Enter でリネームできる")
@@ -1449,6 +1538,10 @@ def _build_set_row(entry):
               fn="smallPlainLabelFont")
 
     if entry["applied"]:
+        cmds.button(label="色", height=22,
+                    c=lambda *a, n=name: _on_set_recolor(n),
+                    ann="このセットの色をまとめて変える\n"
+                        "（掛け直さずにその場で変わる）")
         cmds.button(label="Hide" if entry["enabled"] else "Show", height=22,
                     c=lambda *a, n=name: _on_set_toggle(n),
                     ann="このセットだけ一時的に外す／掛け直す")
@@ -2064,7 +2157,18 @@ _PROBE_COLORS = {
     "basename": (1.0, 1.0, 0.0),    # 黄    名前空間を外した形
     "shape":    (1.0, 0.0, 1.0),    # マゼンタ  v1.0.0 が渡していた形
     "local":    (1.0, 1.0, 1.0),    # 白    参照でないローカルの比較用
+    "pattern":  (0.0, 1.0, 1.0),    # シアン  パターンで渡す
+    "staticset": (1.0, 0.5, 0.0),   # 橙    staticSelection.set() で渡す
+    "group":    (0.5, 0.0, 1.0),    # 紫    グループのまま渡す
+    "child":    (0.6, 0.3, 0.0),    # 茶    その子を別のコレクションに
 }
+
+# **渡し方そのものも試す。** 名前の形が合っていても、渡す API が違えば入らない
+# （`setStaticSelection` は入らなくても例外を出さないので見分けが付かない）
+_PROBE_SETTERS = (
+    ("pattern", "partial", "setPattern"),
+    ("staticset", "long", "staticSelection.set"),
+)
 
 # 引数なしで呼べる getter。 **解決済みの名前を返すものが見つかれば、
 # 次からは目視せずにプログラムで判定できる**
@@ -2088,6 +2192,21 @@ def _name_forms(node):
         "basename": short.rsplit(":", 1)[-1],   # pCube1（名前空間なし）
         "shape": str(shapes[0]) if shapes else str(long_name),
     }
+
+
+def _call_path(obj, path, *args):
+    """`"staticSelection.set"` のような経路で呼ぶ。
+
+    無ければ `<MISSING ...>` を**値にして**返す（調査が途中で止まらない）。
+    """
+    target = obj
+    for part in path.split("."):
+        target = getattr(target, part, None)
+        if target is None:
+            return "<MISSING %s>" % (path,)
+    if not callable(target):
+        return "<NOT CALLABLE %s>" % (path,)
+    return _safe(target, *args)
 
 
 def _dump_selector(selector, indent):
@@ -2195,11 +2314,29 @@ def _probe_members_try():
         _safe(cmds.setAttr, local[0] + ".translateX", 10.0)
     print("    local cube        : %r" % (local_name,))
 
-    trials = [(key, forms[key]) for key in _PROBE_FORMS]
+    trials = [(key, forms[key], "setStaticSelection") for key in _PROBE_FORMS]
     if local_name:
-        trials.append(("local", str(local_name)))
+        trials.append(("local", str(local_name), "setStaticSelection"))
 
-    for key, value in trials:
+    # 渡し方の違い（形ではなく API を変える）
+    trials.extend([(key, forms[form], how) for key, form, how in _PROBE_SETTERS])
+
+    # **グループのまま入れたときに中身へ色が乗るか。** 併せて、子だけを
+    # 別のコレクションに入れたときに**どちらが勝つか**（コレクションの優先順位）
+    child = ""
+    children = _listed(_safe(cmds.listRelatives, node, children=True,
+                             fullPath=True, type="transform"))
+    for candidate in children:
+        if isinstance(candidate, str) and not candidate.startswith("<"):
+            child = candidate
+            break
+    if child:
+        trials.append(("group", forms["long"], "setStaticSelection"))
+        trials.append(("child", str(child), "setStaticSelection"))
+    print("    group / child     : %r / %r"
+          % (forms["long"] if child else "", child))
+
+    for key, value, how in trials:
         name = "%s_%s" % (base, key)
         print("    [%s] %r" % (key, value))
 
@@ -2208,8 +2345,9 @@ def _probe_members_try():
             print("      createCollection : %r" % (collection,))
             continue
         selector = _safe(collection.getSelector)
-        print("      setStaticSelection -> %r"
-              % (_safe(selector.setStaticSelection, [value]),))
+        # `setPattern` は文字列、静的選択は一覧を取る
+        arg = value if how == "setPattern" else [value]
+        print("      %-20s -> %r" % (how, _call_path(selector, how, arg)))
         # **渡した直後に読み返す。** ここで何が返るかが、取り消し線の正体
         print("      読み返し          : %r"
               % (_safe(getattr(selector, "getStaticSelection", None)),))
@@ -2238,14 +2376,19 @@ def _probe_members_try():
     print("    switchToLayer     : %r"
           % (_safe(instance.switchToLayer, layer),))
     print("")
-    print("  **Render Setup ウィンドウを開いて、次の 2 つを教えてください。**")
+    print("  **Render Setup ウィンドウを開いて、次を教えてください。**")
     print("    1. 取り消し線が付いて**いない**コレクションはどれか")
     print("       （コレクション名に long / partial / short / basename /")
-    print("        shape / local が入っています）")
+    print("        shape / local / pattern / staticset が入っています）")
     print("    2. ビューポートでどの色が乗ったか")
     print("       赤=long  緑=partial  青=short  黄=basename")
-    print("       マゼンタ=shape  白=ローカルの比較用 cube")
+    print("       マゼンタ=shape  白=ローカルの cube")
+    print("       シアン=pattern  橙=staticset")
     print("    3. 選んだオブジェクト以外がビューポートに見えているか")
+    if child:
+        print("    4. グループを選んだ場合: 中身に色が乗ったか、そして")
+        print("       子は 紫=group と 茶=child のどちらになったか")
+        print("       （後から作ったコレクションが勝つかを見ています）")
     print("")
     print("  片付け: color_override.probe_members(cleanup=True)")
 
