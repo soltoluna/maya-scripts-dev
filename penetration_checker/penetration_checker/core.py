@@ -9,10 +9,12 @@
     * 「点がメッシュの内側にあるか」の判定（最近接点 + 法線の符号）
     * めり込み頂点ごとのスキンウェイトから「効いている」インフルエンスの集計
     * インフルエンスから、動かすべきコントローラーを辿る探索（グラフは関数で受け取る）
+    * 1 フレーム分の判定の段取り（`Checker`）と、フレーム範囲のスキャン（`scan`）
+    * フレームごとの結果を「めり込んでいる区間」にまとめる（`group_frames`）
 
-Maya に触る部分（頂点座標・最近接点・スキンウェイト・接続の取得）は
-`scene.py` が関数として渡してくる。 ここは受け取った関数を呼ぶだけなので、
-テストでは球や手書きのグラフを渡して境界条件まで詰められる。
+Maya に触る部分（頂点座標・最近接点・スキンウェイト・接続の取得・時間の移動）は
+`scene.py` がアダプターや関数として渡してくる。 ここは受け取ったものを呼ぶだけ
+なので、テストでは動く球や手書きのグラフを渡して境界条件まで詰められる。
 
 単位はすべて呼び出し側の座標系のまま扱う（`scene.py` は Maya の内部単位 cm で渡す）。
 """
@@ -284,3 +286,236 @@ def format_frame(value):
         return "%g" % float(value)
     except (TypeError, ValueError):
         return str(value)
+
+
+# --------------------------------------------------------------------------- #
+# 1 フレーム分の判定
+# --------------------------------------------------------------------------- #
+
+class Checker(object):
+    """対象メッシュの組を持ち、フレームごとに判定を繰り返す。
+
+    `meshes` はアダプターのリスト。 アダプターに求めるもの（`scene.MeshAdapter`
+    が実装する。 テストでは偽物を渡す）:
+
+        name                  フルパス（結果の表示と識別に使う）
+        begin_frame()         フレームが変わったので座標のキャッシュを捨てる
+        points()              今のフレームのワールド頂点座標 [(x, y, z), ...]
+        bbox()                今のフレームのボックス（points から作ってよい）
+        closest(point)        (最近接点, 外向き法線) or None
+        is_closed()           境界エッジが無いか（フレームをまたいで変わらない）
+        weights(index)        {インフルエンス: weight}。 スキンが無ければ None
+
+    `resolve_fn(influence) -> (target, kind, path)` はインフルエンスを選ぶべき
+    ノードに直す関数。 結果はインスタンスの中でキャッシュする（リグの接続は
+    再生中に変わらない）。 スキンウェイトもフレームをまたいで変わらないので
+    キャッシュする — 再生しながら判定するときに効く。
+    """
+
+    def __init__(self, meshes, resolve_fn, tolerance=0.0,
+                 use_open_containers=False, weight_limit=200):
+        self.meshes = list(meshes)
+        self.resolve_fn = resolve_fn
+        self.tolerance = float(tolerance)
+        self.use_open_containers = bool(use_open_containers)
+        self.weight_limit = weight_limit
+        self.warnings = []
+        self._warned = set()
+        self._resolved = {}
+        self._weights = {}
+
+    def _warn(self, key, message):
+        if key not in self._warned:
+            self._warned.add(key)
+            self.warnings.append(message)
+
+    def check_frame(self, progress=None):
+        """今のフレームを調べる。 戻り値は 1 フレーム分の結果 dict:
+
+            {"hits": [{"mesh", "other", "vertices": [(index, depth), ...]}, ...],
+             "targets": aggregate_targets(...) の戻り値,
+             "pairs": 調べた組の数, "cancelled": bool}
+
+        `progress(done, total, label) -> bool` が False を返したら中断する。
+        読めないメッシュは警告に回して残りで続ける（1 つ消えただけで全部
+        止めない）。
+        """
+        by_name = {}
+        bboxes = {}
+        for mesh in self.meshes:
+            try:
+                mesh.begin_frame()
+                bboxes[mesh.name] = mesh.bbox()
+                by_name[mesh.name] = mesh
+            except Exception as exc:
+                self._warn(("read", mesh.name), "%s を読めませんでした: %s"
+                           % (short_name(mesh.name), exc))
+
+        pairs = candidate_pairs(bboxes, margin=self.tolerance)
+        result = {"hits": [], "targets": [], "pairs": len(pairs),
+                  "cancelled": False}
+        for done, (a, b) in enumerate(pairs):
+            if progress and not progress(done, len(pairs), "%s / %s" % (
+                    short_name(a), short_name(b))):
+                result["cancelled"] = True
+                break
+            for mesh, other in ((a, b), (b, a)):
+                container = by_name[other]
+                if not self.use_open_containers and not container.is_closed():
+                    self._warn(("open", other),
+                               "%s は開いたメッシュなので、めり込まれる側としては"
+                               "調べていません" % short_name(other))
+                    continue
+                vertices = find_inside_vertices(
+                    by_name[mesh].points(), container.bbox(), container.closest,
+                    self.tolerance)
+                if vertices:
+                    result["hits"].append({"mesh": mesh, "other": other,
+                                           "vertices": vertices})
+        result["targets"] = aggregate_targets(self._contributions(
+            result["hits"], by_name))
+        return result
+
+    def _weights_of(self, mesh):
+        cache = self._weights.setdefault(mesh.name, {})
+
+        def weights(index):
+            if index not in cache:
+                cache[index] = mesh.weights(index)
+            value = cache[index]
+            # スキンの無いメッシュ（コンストレイントされた小物など）は
+            # メッシュ自身から辿る
+            return {mesh.name: 1.0} if value is None else value
+        return weights
+
+    def resolve(self, influence):
+        if influence not in self._resolved:
+            try:
+                self._resolved[influence] = self.resolve_fn(influence)
+            except Exception as exc:
+                self._warn(("resolve", influence), "%s からコントローラーを"
+                           "探せませんでした: %s" % (short_name(influence), exc))
+                self._resolved[influence] = (influence, "transform", [influence])
+        return self._resolved[influence]
+
+    def _contributions(self, hits, by_name):
+        out = []
+        for hit in hits:
+            mesh = by_name[hit["mesh"]]
+            vertices = hit["vertices"]
+            scores = influence_scores(vertices, self._weights_of(mesh),
+                                      limit=self.weight_limit)
+            if not scores:
+                continue
+            # 1 組につき最も効いているインフルエンスを 1 つ選ぶ
+            influence, score = rank_scores(scores)[0]
+            target, kind, _path = self.resolve(influence)
+            out.append({"target": target, "kind": kind, "score": score,
+                        "mesh": hit["mesh"], "other": hit["other"],
+                        "count": len(vertices), "depth": vertices[0][1]})
+        return out
+
+
+# --------------------------------------------------------------------------- #
+# フレーム範囲
+# --------------------------------------------------------------------------- #
+
+def frame_list(start, end, step=1.0):
+    """`start` から `end` まで（両端を含む）のフレーム。 逆順なら入れ替える。"""
+    step = abs(float(step)) or 1.0
+    start, end = float(start), float(end)
+    if end < start:
+        start, end = end, start
+    count = int(math.floor((end - start) / step + 1e-6)) + 1
+    return [start + i * step for i in range(count)]
+
+
+def scan(checker, frames, set_time_fn, progress=None):
+    """`frames` を順に `set_time_fn(frame)` で移動しながら `checker` で調べる。
+
+    戻り値 `(results, cancelled)`。 `results` は `{frame: check_frame の戻り値}`。
+    `progress(done, total, label) -> bool` が False を返したら、そこまでで止める。
+    時間を元に戻すのは呼び出し側の仕事（例外でも戻せるよう finally で）。
+    """
+    results = {}
+    total = len(frames)
+    for done, frame in enumerate(frames):
+        if progress and not progress(done, total, "frame %s" % format_frame(frame)):
+            return results, True
+        set_time_fn(frame)
+        results[frame] = checker.check_frame()
+    return results, False
+
+
+def group_frames(results, step=1.0):
+    """めり込みのあるフレームを連続した区間にまとめる。
+
+    `results` は `{frame: check_frame の戻り値}`。 戻り値は区間のリスト（時間順）:
+
+        {"start", "end", "frames": [...], "worst_frame", "depth",
+         "targets": [(target, kind), ...]  ← 区間内のスコア合計の大きい順}
+
+    `step` より間が空いたら別の区間にする。
+    """
+    frames = sorted(f for f, r in results.items() if r and r.get("targets"))
+    groups = []
+    for frame in frames:
+        if groups and frame - groups[-1][-1] <= abs(step) + 1e-6:
+            groups[-1].append(frame)
+        else:
+            groups.append([frame])
+
+    out = []
+    for group in groups:
+        scores = {}
+        kinds = {}
+        worst_frame, worst_depth = group[0], -1.0
+        for frame in group:
+            for entry in results[frame]["targets"]:
+                key = entry["target"]
+                scores[key] = scores.get(key, 0.0) + entry.get("score", 0.0)
+                kinds.setdefault(key, entry.get("kind", "transform"))
+                if entry.get("depth", 0.0) > worst_depth:
+                    worst_frame, worst_depth = frame, entry.get("depth", 0.0)
+        out.append({
+            "start": group[0], "end": group[-1], "frames": group,
+            "worst_frame": worst_frame, "depth": max(worst_depth, 0.0),
+            "targets": [(name, kinds[name]) for name, _s in rank_scores(scores)],
+        })
+    return out
+
+
+def format_range_row(group, unit="", scale=None):
+    """区間一覧の 1 行。 `12-18 (7f)  hand_ctl ほか 1  max 0.83cm @15`"""
+    scale = scale or (lambda v: v)
+    if group["start"] == group["end"]:
+        span = format_frame(group["start"])
+    else:
+        span = "%s-%s" % (format_frame(group["start"]), format_frame(group["end"]))
+    targets = group.get("targets") or []
+    who = short_name(targets[0][0]) if targets else "?"
+    if len(targets) > 1:
+        who += " ほか %d" % (len(targets) - 1)
+    return "%s (%df)  %s  max %.3g%s @%s" % (
+        span, len(group["frames"]), who, scale(group.get("depth", 0.0)), unit,
+        format_frame(group["worst_frame"]))
+
+
+def hud_text(result, unit="", scale=None):
+    """ビューポートの HUD に出す 1 行。
+
+    ASCII だけで組む（HUD のフォントで日本語が化ける環境に備える）。
+    `result` は 1 フレーム分の結果。 `None` は「このフレームは調べていない」。
+    """
+    scale = scale or (lambda v: v)
+    if result is None:
+        return "-- (not checked)"
+    targets = result.get("targets") or []
+    if not targets:
+        return "OK"
+    top = targets[0]
+    text = "HIT  %s  %.3g%s" % (short_name(top["target"]),
+                                 scale(top.get("depth", 0.0)), unit)
+    if len(targets) > 1:
+        text += "  (+%d)" % (len(targets) - 1)
+    return text

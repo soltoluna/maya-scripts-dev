@@ -22,7 +22,9 @@ Maya のインストールは不要（Python 3.10+ の標準ライブラリの�
   **ハブ `install.py` が拾える形になっているか**、GitHub 座標と `NAMESPACE` の
   一致、`SHELF_LABEL`、ウィンドウ名の規約、Python 3.10 構文、`show()` の一往復
 - `test_core.py` — 内外判定（球）・スコア集計・コントローラー探索（手書きのグラフ）
-- `test_ui.py` — UI の配線。 `scene`（OpenMaya を使う層）は偽物に差し替える。
+- `test_frames.py` — `core.Checker` / `scan` / `group_frames` / HUD の文言。
+  「時間で動く球」の偽アダプターで、スキャンから区間のまとめまでを通す
+- `test_ui.py` — UI の配線（3 つの入口・timeChanged・HUD・後片付け）。 `scene`（OpenMaya を使う層）は偽物に差し替える。
   **`scene.py` 自体は自宅では一度も実行されない**（実機確認と `diagnose()` が頼り）
 
 配布の仕組みそのもの（ハブの探索規則・配布対象の拡張子）は**リポジトリ直下の

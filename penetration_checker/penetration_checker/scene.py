@@ -1,25 +1,37 @@
 # -*- coding: utf-8 -*-
 """Penetration Checker — シーンを読む層（Maya 依存）。
 
-**シーンを一切変更しない。** 読むのは頂点座標・最近接点・スキンウェイト・
-接続だけで、判定と集計は `core` に任せる。 ここは「Maya から値を取ってきて
-`core` に関数として渡す」だけに保つ（自宅で検証できないコードを薄くするため）。
+**シーンを変更しない**（時間を動かすのはスキャン中だけで、終わったら戻す）。
+読むのは頂点座標・最近接点・スキンウェイト・接続だけで、判定・集計・
+スキャンの段取りは `core` に任せる。 ここは `core.Checker` に渡す
+アダプター（`MeshAdapter`）と、時間まわりの小さな関数を持つだけに保つ。
 
 座標はすべて **Maya の内部単位（cm）のワールド空間**で扱う。 OpenMaya の
 `getPoints(kWorld)` は UI の単位設定に関係なく内部単位で返すので、
 `cmds.exactWorldBoundingBox`（UI 単位）と混ぜない。 ボックスも点から作る。
-許容値と深さの表示だけ `MDistance` で UI 単位と変換する。
+許容値の入力と深さの表示だけ `MDistance` で UI 単位と変換する。
 
-実機の戻り値が想定と違ったときのために `diagnose()` を置いてある。
+最近接点の求め方は 2 通り持っている（`set_backend()` で切り替え）:
+
+* `"intersector"`（既定）— `MMeshIntersector`。 八分木を作るので速い。
+  **問い合わせはオブジェクト空間で行い**、ワールドへの変換は自分でする
+  （行列を渡したときの戻り値の空間を推測しないため）
+* `"fnmesh"` — `MFnMesh.getClosestPointAndNormal(kWorld)`。 総当たりで遅いが、
+  空間の扱いに曖昧さが無い。 `diagnose()` が両者を突き合わせる
 """
 
 from __future__ import annotations
 
-from maya import cmds
+from maya import cmds, mel
 from maya.api import OpenMaya as om
 
-from . import core
+from . import NAMESPACE, core
 
+
+_PACKAGE = __package__ or __name__.rsplit(".", 1)[0]
+_OPTVAR_BACKEND = "%s_%s_backend" % (NAMESPACE, _PACKAGE)
+
+_BACKENDS = ("intersector", "fnmesh")
 
 # 接続を辿るときに無視する入力アトリビュート。 これらはジョイントの動きの
 # 「出どころ」ではない（親ジョイントの scale・表示レイヤー・セットなど）
@@ -33,6 +45,22 @@ _IGNORED_DEST_ATTRS = frozenset((
 _WEIGHT_SAMPLE_LIMIT = 200
 
 
+def get_backend():
+    if cmds.optionVar(exists=_OPTVAR_BACKEND):
+        value = cmds.optionVar(q=_OPTVAR_BACKEND)
+        if value in _BACKENDS:
+            return value
+    return _BACKENDS[0]
+
+
+def set_backend(name):
+    """最近接点の求め方を切り替える（`"intersector"` / `"fnmesh"`）。 保存される。"""
+    if name not in _BACKENDS:
+        raise ValueError("backend must be one of %s: %r" % (_BACKENDS, name))
+    cmds.optionVar(sv=(_OPTVAR_BACKEND, name))
+    print("[%s] backend: %s" % (_PACKAGE, name))
+
+
 # --------------------------------------------------------------------------- #
 # 対象メッシュの列挙
 # --------------------------------------------------------------------------- #
@@ -41,7 +69,8 @@ def expand_meshes(nodes, skip_hidden=True):
     """指定ノード（グループ可）の配下にあるメッシュのトランスフォームを返す。
 
     中間オブジェクト（スキンの元形状など）は除く。 重複は 1 つにまとめ、
-    フルパスで返す。
+    フルパスで返す。 非表示の判定は呼んだ時点のもの（キーで表示が変わる
+    メッシュには、スキャン中は追従しない）。
     """
     found = []
     seen = set()
@@ -90,21 +119,59 @@ def _is_visible(node):
 
 
 # --------------------------------------------------------------------------- #
-# メッシュの読み取り
+# メッシュのアダプター（core.Checker に渡す）
 # --------------------------------------------------------------------------- #
 
-class _MeshData(object):
-    """1 メッシュ分の読み取り結果。 判定のあいだ使い回す。"""
+class MeshAdapter(object):
+    """1 メッシュ分の読み取り。 `core.Checker` が求める形（core の docstring）。
 
-    def __init__(self, transform):
-        self.transform = transform
+    座標と最近接点の準備はフレームごとに捨てて作り直す（`begin_frame`）。
+    スキンクラスターと閉じているかどうかはフレームをまたいで使い回す。
+    """
+
+    def __init__(self, transform, backend=None):
+        self.name = transform
         self.shape_path = _shape_path(transform)
         self.shape = self.shape_path.fullPathName()
-        self.fn = om.MFnMesh(self.shape_path)
-        self.points = [(p.x, p.y, p.z)
-                       for p in self.fn.getPoints(om.MSpace.kWorld)]
-        self.bbox = core.bbox_of_points(self.points)
+        self.backend = backend or get_backend()
+        self.skin = find_skin_cluster(self.shape)
         self._closed = None
+        self.begin_frame()
+
+    # -- フレームごと --------------------------------------------------------
+
+    def begin_frame(self):
+        self._points = None
+        self._bbox = None
+        self._query = None
+
+    def points(self):
+        if self._points is None:
+            fn = om.MFnMesh(self.shape_path)
+            self._points = [(p.x, p.y, p.z)
+                            for p in fn.getPoints(om.MSpace.kWorld)]
+        return self._points
+
+    def bbox(self):
+        if self._bbox is None:
+            self._bbox = core.bbox_of_points(self.points())
+        return self._bbox
+
+    def make_query(self, backend=None):
+        backend = backend or self.backend
+        if backend == "intersector":
+            return _IntersectorQuery(self.shape_path)
+        return _FnMeshQuery(self.shape_path)
+
+    def closest(self, point):
+        if self._query is None:
+            self._query = self.make_query()
+        try:
+            return self._query(point)
+        except Exception:
+            return None
+
+    # -- フレームをまたいで変わらない ----------------------------------------
 
     def is_closed(self):
         """境界エッジが 1 本も無ければ閉じたメッシュ。"""
@@ -119,12 +186,56 @@ class _MeshData(object):
             self._closed = closed
         return self._closed
 
-    def closest(self, point):
-        try:
-            hit, normal, _face = self.fn.getClosestPointAndNormal(
-                om.MPoint(point[0], point[1], point[2]), om.MSpace.kWorld)
-        except Exception:
+    def weights(self, index):
+        """`{インフルエンス: weight}`。 スキンが無ければ `None`。"""
+        if not self.skin:
             return None
+        component = "%s.vtx[%d]" % (self.shape, index)
+        try:
+            names = cmds.skinPercent(self.skin, component, q=True, transform=None,
+                                     ignoreBelow=1e-4) or []
+            values = cmds.skinPercent(self.skin, component, q=True, value=True,
+                                      ignoreBelow=1e-4) or []
+        except Exception:
+            return {}
+        out = {}
+        for name, value in zip(names, values):
+            long_name = _long(name)
+            out[long_name] = out.get(long_name, 0.0) + float(value)
+        return out
+
+
+class _FnMeshQuery(object):
+    """`MFnMesh.getClosestPointAndNormal(kWorld)`。 遅いが空間が明確。"""
+
+    def __init__(self, shape_path):
+        self.fn = om.MFnMesh(shape_path)
+
+    def __call__(self, point):
+        hit, normal, _face = self.fn.getClosestPointAndNormal(
+            om.MPoint(point[0], point[1], point[2]), om.MSpace.kWorld)
+        return (hit.x, hit.y, hit.z), (normal.x, normal.y, normal.z)
+
+
+class _IntersectorQuery(object):
+    """`MMeshIntersector`。 単位行列で作り、問い合わせはオブジェクト空間で行う。
+
+    点はワールド → オブジェクトへ逆行列で移し、戻ってきた点は行列でワールドへ、
+    法線は逆行列の転置でワールドへ戻す（非一様スケールでも向きが正しい）。
+    """
+
+    def __init__(self, shape_path):
+        self.matrix = shape_path.inclusiveMatrix()
+        self.inverse = shape_path.inclusiveMatrixInverse()
+        self.normal_matrix = self.inverse.transpose()
+        self.intersector = om.MMeshIntersector()
+        self.intersector.create(shape_path.node(), om.MMatrix())
+
+    def __call__(self, point):
+        local = om.MPoint(point[0], point[1], point[2]) * self.inverse
+        info = self.intersector.getClosestPoint(local)
+        hit = om.MPoint(info.point) * self.matrix
+        normal = om.MVector(info.normal) * self.normal_matrix
         return (hit.x, hit.y, hit.z), (normal.x, normal.y, normal.z)
 
 
@@ -136,24 +247,6 @@ def find_skin_cluster(shape):
     history = cmds.listHistory(shape, pruneDagObjects=True) or []
     clusters = cmds.ls(history, type="skinCluster") or []
     return clusters[0] if clusters else None
-
-
-def _weights_fn(skin, shape):
-    def weights(index):
-        component = "%s.vtx[%d]" % (shape, index)
-        try:
-            names = cmds.skinPercent(skin, component, q=True, transform=None,
-                                     ignoreBelow=1e-4) or []
-            values = cmds.skinPercent(skin, component, q=True, value=True,
-                                      ignoreBelow=1e-4) or []
-        except Exception:
-            return {}
-        out = {}
-        for name, value in zip(names, values):
-            long_name = (cmds.ls(name, long=True) or [name])[0]
-            out[long_name] = out.get(long_name, 0.0) + float(value)
-        return out
-    return weights
 
 
 # --------------------------------------------------------------------------- #
@@ -227,103 +320,70 @@ def resolve_target(node):
 
 
 # --------------------------------------------------------------------------- #
-# 判定本体
+# Checker の組み立て
 # --------------------------------------------------------------------------- #
 
-def check(nodes, tolerance_ui=0.0, use_open_containers=False, skip_hidden=True,
-          progress=None):
-    """めり込みを調べて結果を返す。 シーンは変更しない。
+def make_checker(nodes, tolerance_ui=0.0, use_open_containers=False,
+                 skip_hidden=True):
+    """対象ノードから `core.Checker` を作る。 戻り値 `(checker, meshes, warnings)`。
 
-    * `tolerance_ui` — UI 単位の許容深さ
-    * `use_open_containers` — 開いたメッシュ（境界エッジがある）も「内側」を
-      持つものとして扱うか。 既定では閉じたメッシュだけを入れ物にする
-    * `progress(done, total, label) -> bool` — False を返すと中断する
-
-    戻り値:
-        {"meshes": [...], "pairs": [(a, b), ...], "hits": [...],
-         "targets": core.aggregate_targets(...) の戻り値,
-         "warnings": [...], "cancelled": bool}
-
-    `hits` の要素は `{"mesh", "other", "vertices": [(index, depth), ...]}`
-    （`mesh` の頂点が `other` の内側にある）。 深さは内部単位（cm）。
+    メッシュが 2 つ未満なら `checker` は `None`。 読めないメッシュは警告に
+    回して残りで作る。
     """
-    tolerance = om.MDistance.uiToInternal(float(tolerance_ui))
-    result = {"meshes": [], "pairs": [], "hits": [], "targets": [],
-              "warnings": [], "cancelled": False}
-
     meshes = expand_meshes(nodes, skip_hidden=skip_hidden)
-    result["meshes"] = meshes
-    if len(meshes) < 2:
-        result["warnings"].append("メッシュが 2 つ以上必要です（%d 個）" % len(meshes))
-        return result
-
-    data = {}
+    warnings = []
+    adapters = []
+    backend = get_backend()
     for transform in meshes:
         try:
-            data[transform] = _MeshData(transform)
+            adapters.append(MeshAdapter(transform, backend))
         except Exception as exc:
-            result["warnings"].append("%s を読めませんでした: %s"
-                                      % (core.short_name(transform), exc))
-    bboxes = {name: d.bbox for name, d in data.items()}
-    pairs = core.candidate_pairs(bboxes, margin=tolerance)
-    result["pairs"] = pairs
-
-    open_skipped = set()
-    total = len(pairs)
-    for done, (a, b) in enumerate(pairs):
-        if progress and not progress(done, total, "%s / %s" % (
-                core.short_name(a), core.short_name(b))):
-            result["cancelled"] = True
-            break
-        for mesh, other in ((a, b), (b, a)):
-            container = data[other]
-            if not use_open_containers and not container.is_closed():
-                open_skipped.add(other)
-                continue
-            vertices = core.find_inside_vertices(
-                data[mesh].points, container.bbox, container.closest, tolerance)
-            if vertices:
-                result["hits"].append({"mesh": mesh, "other": other,
-                                       "vertices": vertices})
-
-    for name in sorted(open_skipped):
-        result["warnings"].append(
-            "%s は開いたメッシュなので、めり込まれる側としては調べていません"
-            % core.short_name(name))
-
-    result["targets"] = core.aggregate_targets(_contributions(result["hits"], data))
-    return result
+            warnings.append("%s を読めませんでした: %s"
+                            % (core.short_name(transform), exc))
+    if len(adapters) < 2:
+        warnings.append("メッシュが 2 つ以上必要です（%d 個）" % len(adapters))
+        return None, meshes, warnings
+    checker = core.Checker(
+        adapters, resolve_target,
+        tolerance=om.MDistance.uiToInternal(float(tolerance_ui)),
+        use_open_containers=use_open_containers,
+        weight_limit=_WEIGHT_SAMPLE_LIMIT)
+    return checker, meshes, warnings
 
 
-def _contributions(hits, data):
-    contributions = []
-    resolved = {}
-    for hit in hits:
-        mesh = hit["mesh"]
-        shape = data[mesh].shape
-        vertices = hit["vertices"]
-        skin = find_skin_cluster(shape)
-        if skin:
-            scores = core.influence_scores(vertices, _weights_fn(skin, shape),
-                                           limit=_WEIGHT_SAMPLE_LIMIT)
-        else:
-            # スキンが無いメッシュ（コンストレイントされた小物など）は
-            # メッシュ自身から辿る
-            scores = core.influence_scores(vertices, lambda _i: {mesh: 1.0},
-                                           limit=_WEIGHT_SAMPLE_LIMIT)
-        if not scores:
-            continue
-        # 1 組につき最も効いているインフルエンスを 1 つ選ぶ
-        influence, score = core.rank_scores(scores)[0]
-        if influence not in resolved:
-            resolved[influence] = resolve_target(influence)
-        target, kind, _path = resolved[influence]
-        contributions.append({
-            "target": target, "kind": kind, "score": score,
-            "mesh": mesh, "other": hit["other"],
-            "count": len(vertices), "depth": vertices[0][1],
-        })
-    return contributions
+# --------------------------------------------------------------------------- #
+# 時間・単位
+# --------------------------------------------------------------------------- #
+
+def current_frame():
+    return cmds.currentTime(query=True)
+
+
+def set_frame(frame):
+    """時間を動かして評価させる（`update=True`）。"""
+    cmds.currentTime(frame, update=True)
+
+
+def is_playing():
+    return bool(cmds.play(query=True, state=True))
+
+
+def time_range():
+    """調べる範囲 `(start, end, 説明)`。
+
+    タイムスライダーで範囲を選んで（Shift + ドラッグ）赤く表示していればそこ、
+    無ければ再生範囲（スライダーの min / max）。
+    """
+    try:
+        slider = mel.eval("$ntkPenTmp = $gPlayBackSlider")
+        if slider and cmds.timeControl(slider, query=True, rangeVisible=True):
+            start, end = cmds.timeControl(slider, query=True, rangeArray=True)
+            # rangeArray は終端を含まない（[start, end)）
+            return float(start), float(end) - 1.0, "選択範囲"
+    except Exception:
+        pass
+    return (cmds.playbackOptions(query=True, minTime=True),
+            cmds.playbackOptions(query=True, maxTime=True), "再生範囲")
 
 
 def to_ui_distance(value):
@@ -346,21 +406,25 @@ def _safe(func, *args, **kwargs):
 
 
 def diagnose(node=None):
-    """コントローラー探索とメッシュの読み取りを Script Editor に出す。
+    """コントローラー探索・メッシュの読み取り・最近接点の 2 方式を Script Editor に出す。
 
     **シーンを変更しない。 途中で例外を上げず、`<ERROR ...>` を値にして最後まで出す。**
     結果が期待と違ったら、この出力を貼ってもらって直す（推測で直さない）。
 
     `node` を省略すると選択中のノード（複数可）を調べる。 渡すと良いもの:
-      * めり込みを見たいメッシュ — スキン・閉じているか・最も効くインフルエンス
+      * めり込んでいるメッシュ 2 つ — スキン・閉じているか・最近接点の 2 方式の突き合わせ
       * ジョイント — 上流のどこでコントローラーに当たるか
     """
     targets = [node] if node else (cmds.ls(selection=True, long=True) or [])
     lines = ["=" * 60, "[penetration_checker] diagnose", "=" * 60]
-    lines.append("maya: %s / unit: %s" % (_safe(cmds.about, version=True),
-                                          _safe(ui_unit)))
+    lines.append("maya: %s / unit: %s / backend: %s" % (
+        _safe(cmds.about, version=True), _safe(ui_unit), _safe(get_backend)))
+    lines.append("frame: %s / time_range: %s / evaluationManager: %s" % (
+        _safe(current_frame), _safe(time_range),
+        _safe(cmds.evaluationManager, query=True, mode=True)))
     if not targets:
         lines.append("<nothing selected>")
+    all_meshes = []
     for target in targets:
         lines.append("-" * 60)
         lines.append("node: %s" % target)
@@ -376,6 +440,9 @@ def diagnose(node=None):
         if isinstance(meshes, list):
             for mesh in meshes[:5]:
                 lines.extend(_diagnose_mesh(mesh))
+                all_meshes.append(mesh)
+    if len(all_meshes) >= 2:
+        lines.extend(_diagnose_pair(all_meshes[0], all_meshes[1]))
     lines.append("=" * 60)
     text = "\n".join(lines)
     print(text)
@@ -384,21 +451,61 @@ def diagnose(node=None):
 
 def _diagnose_mesh(mesh):
     out = ["  mesh: %s" % mesh]
-    data = _safe(_MeshData, mesh)
+    data = _safe(MeshAdapter, mesh, "fnmesh")
     if isinstance(data, str):
         out.append("    read: %s" % data)
         return out
-    out.append("    vertices: %d / bbox(cm): %s" % (len(data.points), data.bbox))
+    points = _safe(data.points)
+    if isinstance(points, str):
+        out.append("    points: %s" % points)
+        return out
+    out.append("    vertices: %d / bbox(cm): %s" % (len(points), _fmt(_safe(data.bbox))))
     out.append("    closed: %s" % _safe(data.is_closed))
-    if data.points:
-        out.append("    closest(v0): %s" % (_safe(data.closest, data.points[0]),))
-    skin = _safe(find_skin_cluster, data.shape)
-    out.append("    skinCluster: %s" % (skin,))
-    if skin and not str(skin).startswith("<ERROR"):
-        weights = _safe(_weights_fn(skin, data.shape), 0)
+    out.append("    skinCluster: %s" % (data.skin,))
+    if data.skin and points:
+        weights = _safe(data.weights, 0)
         out.append("    weights(v0): %s" % (weights,))
         if isinstance(weights, dict) and weights:
             top = core.rank_scores(weights)[0][0]
             out.append("    resolve_target(%s): %s"
                        % (core.short_name(top), _safe(resolve_target, top)))
     return out
+
+
+def _diagnose_pair(a, b):
+    """a の頂点（最大 5 個）と a のボックス中心を b に問い合わせ、2 方式を並べる。"""
+    out = ["-" * 60, "closest: %s -> %s" % (core.short_name(a), core.short_name(b))]
+    src = _safe(MeshAdapter, a, "fnmesh")
+    dst = _safe(MeshAdapter, b, "fnmesh")
+    if isinstance(src, str) or isinstance(dst, str):
+        out.append("  read: %s / %s" % (src, dst))
+        return out
+    points = _safe(src.points)
+    if isinstance(points, str) or not points:
+        out.append("  points: %s" % (points,))
+        return out
+    box = src.bbox()
+    samples = list(points[:5]) + [tuple((box[i] + box[i + 3]) * 0.5 for i in range(3))]
+    queries = {}
+    for backend in _BACKENDS:
+        queries[backend] = _safe(dst.make_query, backend)
+    for p in samples:
+        out.append("  p=%s" % (_fmt(p),))
+        for backend in _BACKENDS:
+            query = queries[backend]
+            if isinstance(query, str):
+                out.append("    %-11s: %s" % (backend, query))
+                continue
+            answer = _safe(query, p)
+            depth = (_safe(core.penetration_depth, p, *answer)
+                     if isinstance(answer, tuple) else "-")
+            out.append("    %-11s: %s depth=%s" % (backend, _fmt(answer), _fmt(depth)))
+    return out
+
+
+def _fmt(value):
+    if isinstance(value, float):
+        return "%.4f" % value
+    if isinstance(value, (tuple, list)):
+        return "(" + ", ".join(_fmt(v) for v in value) + ")"
+    return str(value)
