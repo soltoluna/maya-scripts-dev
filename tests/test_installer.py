@@ -121,6 +121,43 @@ class ConstantCase(unittest.TestCase):
             len(hub._shelf_label("x", 'SHELF_LABEL = "0123456789ABC"')), 10)
 
 
+class ShelfIconCase(unittest.TestCase):
+    """パッケージ直下の `icon.png` / `icon.svg` をシェルフアイコンにする。"""
+
+    def test_uses_icon_png_when_present(self):
+        self.assertEqual(hub._shelf_icon(["__init__.py", "icon.png"]),
+                         "icon.png")
+
+    def test_falls_back_to_svg(self):
+        self.assertEqual(hub._shelf_icon(["__init__.py", "icon.svg"]),
+                         "icon.svg")
+
+    def test_png_wins_over_svg(self):
+        self.assertEqual(hub._shelf_icon(["icon.svg", "icon.png"]), "icon.png")
+
+    def test_no_icon_means_default(self):
+        self.assertIsNone(hub._shelf_icon(["__init__.py", "ui.py"]))
+
+    def test_only_the_package_root_counts(self):
+        """`images/icon.png` のような入れ子はアイコン扱いしない（意図しない画像を拾わない）。"""
+        self.assertIsNone(hub._shelf_icon(["__init__.py", "images/icon.png"]))
+
+    def test_icon_names_are_distributed(self):
+        """アイコンの拡張子が配布対象に入っていないと、実機でだけ既定アイコンに戻る。"""
+        for name in hub._SHELF_ICON_NAMES:
+            self.assertTrue(name.endswith(hub._ALLOWED_SUFFIXES), name)
+
+    def test_every_repo_icon_is_picked_up(self):
+        """リポジトリにアイコンを置いたツールは、ハブがそれを使うこと。"""
+        found = hub._local_tools(str(REPO_ROOT))
+        for tool in _tool_dirs():
+            for name in hub._SHELF_ICON_NAMES:
+                if (tool / tool.name / name).is_file():
+                    with self.subTest(tool=tool.name):
+                        self.assertIsNotNone(
+                            hub._shelf_icon(found[tool.name]))
+
+
 class RepositoryCase(unittest.TestCase):
     """**実リポジトリとの突き合わせ。** 配布漏れを止める最後の砦。"""
 

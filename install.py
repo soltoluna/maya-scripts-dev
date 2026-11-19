@@ -29,7 +29,8 @@
 * `__pycache__` を消す（`.pyc` は mtime ベースなので、古いバイトコードが
   新しいソースを覆い隠すことがある — §1-5）
 * `sys.modules` から各ツールを落とす（次の import がディスクから読み直す）
-* ツールごとにシェルフボタンを貼り直す（左クリック=起動 / 右クリック=更新）
+* ツールごとにシェルフボタンを貼り直す（左クリック=起動 / 右クリック=更新）。
+  パッケージ直下に `icon.png`（か `icon.svg`）があれば、それをアイコンにする
 
 **同じファイルを 2 回ドラッグしても何も起きない**（`onMayaDroppedPythonFile`
 はセッション内で 1 度しか呼ばれない — §1-8）。 更新はツール UI の
@@ -427,6 +428,20 @@ def _shelf_label(name, init_source):
     return ("".join(p[:3].capitalize() for p in parts) or name)[:10]
 
 
+# シェルフアイコンとして使うファイル名（パッケージ直下）。 上から順に探し、
+# 最初に見つかったものを使う。 **置くだけで反映され、登録作業は無い**
+# （配布対象の拡張子 `_ALLOWED_SUFFIXES` に含まれていること）
+_SHELF_ICON_NAMES = ("icon.png", "icon.svg")
+
+
+def _shelf_icon(files):
+    """パッケージ内のアイコンの相対パス。 無ければ None（既定の Python アイコン）。"""
+    for candidate in _SHELF_ICON_NAMES:
+        if candidate in files:
+            return candidate
+    return None
+
+
 def _close_existing_window(name, init_source):
     """更新前に開いているウィンドウを閉じる。
 
@@ -475,7 +490,10 @@ def _launch_cmd(name):
     ) % {"mod": name}
 
 
-def _add_shelf_button(name, label):
+def _add_shelf_button(name, label, icon_path=None):
+    """シェルフボタンを貼る。 `icon_path` があればそれを、無ければ Python の
+    既定アイコンにラベルを重ねて使う（アイコンがあるのに文字を重ねると潰れる）。
+    """
     from maya import cmds, mel
 
     top_shelf = mel.eval("$tmp = $gShelfTopLevel")
@@ -498,8 +516,8 @@ def _add_shelf_button(name, label):
         parent=current,
         label=label,
         annotation="Left-click: launch.  Right-click: update all tools.",
-        image="pythonFamily.png",
-        imageOverlayLabel=label[:5],
+        image=icon_path or "pythonFamily.png",
+        imageOverlayLabel="" if icon_path else label[:5],
         command=launch,
         sourceType="python",
     )
@@ -571,7 +589,10 @@ def install():
     lines = []
     for name, files in sorted(sources.items()):
         label = _shelf_label(name, files.get("__init__.py", b""))
-        _add_shelf_button(name, label)
+        icon = _shelf_icon(files)
+        icon_path = (os.path.join(user_scripts, name, icon).replace("\\", "/")
+                     if icon else None)
+        _add_shelf_button(name, label, icon_path)
         current = _read_installed_constant(user_scripts, name, "__version__")
         lines.append("%-28s %s -> %s  [%s]"
                      % (name, previous.get(name, "(unknown)"), current, label))
