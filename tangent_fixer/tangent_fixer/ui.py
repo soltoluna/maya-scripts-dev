@@ -26,6 +26,7 @@ _NS = "%s_%s" % (NAMESPACE, _PACKAGE)          # ntk_tangent_fixer
 WINDOW = _NS + "Win"
 
 _OPTVAR_END_MODE = _NS + "_end_mode"           # ntk_tangent_fixer_end_mode
+_OPTVAR_METHOD = _NS + "_method"               # ntk_tangent_fixer_method
 
 _PROBE_NODE = _NS + "_probe"
 
@@ -33,6 +34,9 @@ _PROBE_NODE = _NS + "_probe"
 _SKIP_OUT_TYPES = ("step", "stepnext")
 
 _END_LABELS = (("Flat", core.END_FLAT), ("Natural", core.END_NATURAL))
+_METHOD_LABELS = (("Smooth", core.METHOD_SMOOTH),
+                  ("Tangent", core.METHOD_TANGENT),
+                  ("Strict", core.METHOD_STRICT))
 
 _CTRL = {}   # コントロール名の控え。 show() のたびに作り直す
 
@@ -103,14 +107,16 @@ def _measure_scale(curve, times, values, target_indices):
                                        seg[core.segment_for(index, side)])
 
 
-def _fix_curve(curve, target_indices, end_mode, fallback_scale):
+def _fix_curve(curve, target_indices, end_mode, fallback_scale,
+               method=core.METHOD_SMOOTH):
     """1 本のカーブを直す。 `(書き換えたキー数, 段差で飛ばした数, 倍率, 実測か)`。"""
     times = cmds.keyframe(curve, q=True, timeChange=True) or []
     values = cmds.keyframe(curve, q=True, valueChange=True) or []
     if len(times) < 2:
         return 0, 0, None, False
 
-    plan = core.plan_curve(times, values, target_indices, end_mode=end_mode)
+    plan = core.plan_curve(times, values, target_indices, end_mode=end_mode,
+                           method=method)
     out_types = cmds.keyTangent(curve, q=True, outTangentType=True) or []
     skipped = [i for i, _ in plan
                if i < len(out_types) and out_types[i] in _SKIP_OUT_TYPES]
@@ -133,13 +139,15 @@ def _fix_curve(curve, target_indices, end_mode, fallback_scale):
     return len(plan), len(skipped), scale, measured
 
 
-def fix(end_mode=None):
+def fix(end_mode=None, method=None):
     """選択キー（無ければ選択オブジェクトの全キー）のタンジェントを直す。
 
     ホットキーやシェルフから直接呼べる。 戻り値は結果の 1 行要約。
     """
     if end_mode is None:
-        end_mode = _saved_end_mode()
+        end_mode = _saved(_OPTVAR_END_MODE, core.END_MODES, core.END_FLAT)
+    if method is None:
+        method = _saved(_OPTVAR_METHOD, core.METHODS, core.METHOD_SMOOTH)
 
     targets, source = _collect_targets()
     if not targets:
@@ -159,7 +167,7 @@ def fix(end_mode=None):
         for curve, indices in targets:
             try:
                 keys, skipped, scale, measured = _fix_curve(
-                    curve, indices, end_mode, fallback)
+                    curve, indices, end_mode, fallback, method)
             except Exception as exc:   # 1 本の失敗で全体を止めない
                 failed.append((curve, exc))
                 continue
@@ -178,7 +186,8 @@ def fix(end_mode=None):
     finally:
         cmds.undoInfo(closeChunk=True)
 
-    summary = "%d key(s) on %d curve(s) from %s" % (n_keys, n_curves, source)
+    summary = "%d key(s) on %d curve(s) from %s [%s / %s]" % (
+        n_keys, n_curves, source, method, end_mode)
     if n_skipped:
         summary += ", %d stepped key(s) skipped" % (n_skipped,)
     _log(summary + "  [time unit: %s]" % (unit,))
@@ -319,19 +328,27 @@ def _probe_try(fps):
 # ウィンドウ
 # --------------------------------------------------------------------------- #
 
-def _saved_end_mode():
-    if cmds.optionVar(exists=_OPTVAR_END_MODE):
-        value = cmds.optionVar(q=_OPTVAR_END_MODE)
-        if value in core.END_MODES:
+def _saved(key, allowed, default):
+    if cmds.optionVar(exists=key):
+        value = cmds.optionVar(q=key)
+        if value in allowed:
             return value
-    return core.END_FLAT
+    return default
+
+
+def _radio_value(ctrl, labels):
+    selected = cmds.radioButtonGrp(ctrl, q=True, select=True) or 1
+    selected = max(1, min(len(labels), int(selected)))
+    return labels[selected - 1][1]
 
 
 def _on_end_mode_changed(*_args):
-    selected = cmds.radioButtonGrp(_CTRL["end"], q=True, select=True) or 1
-    selected = max(1, min(len(_END_LABELS), int(selected)))
-    mode = _END_LABELS[selected - 1][1]
-    cmds.optionVar(sv=(_OPTVAR_END_MODE, mode))
+    cmds.optionVar(sv=(_OPTVAR_END_MODE, _radio_value(_CTRL["end"], _END_LABELS)))
+
+
+def _on_method_changed(*_args):
+    cmds.optionVar(sv=(_OPTVAR_METHOD,
+                       _radio_value(_CTRL["method"], _METHOD_LABELS)))
 
 
 def _on_fix(*_args):
@@ -345,14 +362,22 @@ def _set_status(message):
 
 
 def _build_body():
-    mode = _saved_end_mode()
+    mode = _saved(_OPTVAR_END_MODE, core.END_MODES, core.END_FLAT)
     selected = [m for _, m in _END_LABELS].index(mode) + 1
+    method = _saved(_OPTVAR_METHOD, core.METHODS, core.METHOD_SMOOTH)
+    method_index = [m for _, m in _METHOD_LABELS].index(method) + 1
 
     cmds.separator(h=4, style="none")
     cmds.text(l="キーを選択（無ければオブジェクトを選択）して Fix。\n"
-                "極値はフラット、中間キーは前後に滑らかにつなぎ、\n"
-                "キーに無いオーバーシュートを作らない。",
+                "中間キーは前後のキーを通る曲線の接線に、極値はフラットにする。",
               align="left")
+    _CTRL["method"] = cmds.radioButtonGrp(
+        label="Method", labelArray3=[l for l, _ in _METHOD_LABELS],
+        numberOfRadioButtons=3, select=method_index, cw4=(70, 70, 70, 70),
+        changeCommand=_on_method_changed,
+        annotation="Smooth: 接線。はみ出すときだけ抑える / "
+                   "Tangent: 接線そのもの（わずかにはみ出し得る） / "
+                   "Strict: 強く抑える（v0.1.0）")
     _CTRL["end"] = cmds.radioButtonGrp(
         label="End Keys", labelArray2=[l for l, _ in _END_LABELS],
         numberOfRadioButtons=2, select=selected, cw3=(70, 70, 70),

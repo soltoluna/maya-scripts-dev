@@ -65,10 +65,49 @@ class SlopeCase(unittest.TestCase):
             times = sorted(rng.sample(range(0, 200), n))
             values = [rng.uniform(-50, 50) for _ in range(n)]
             for mode in core.END_MODES:
-                slopes = core.compute_slopes(times, values, end_mode=mode)
-                self.assertLessEqual(
-                    core.max_overshoot(times, values, slopes), 1e-7,
-                    "overshoot: %r %r %s" % (times, values, mode))
+                for method in (core.METHOD_SMOOTH, core.METHOD_STRICT):
+                    slopes = core.compute_slopes(times, values, end_mode=mode,
+                                                 method=method)
+                    self.assertLessEqual(
+                        core.max_overshoot(times, values, slopes), 1e-7,
+                        "overshoot: %r %r %s %s"
+                        % (times, values, mode, method))
+
+    def test_tangent_method_is_exact_parabola_tangent(self):
+        """v0.2.0: 「タンジェントが接線になってほしい」。 頭打ちしない。"""
+        times = [0, 10, 20, 30]
+        values = [0.0, 1.0, 9.0, 10.0]
+        slopes = core.compute_slopes(times, values,
+                                     method=core.METHOD_TANGENT)
+        self.assertAlmostEqual(slopes[1],
+                               core.parabola_slope(0.1, 0.8, 10, 10))
+        self.assertAlmostEqual(slopes[2],
+                               core.parabola_slope(0.8, 0.1, 10, 10))
+
+    def test_smooth_keeps_tangent_where_strict_flattens_it(self):
+        """片側が緩い区間: 原式（2 倍）は接線を寝かせるが、smooth（3 倍）は保つ。"""
+        times = [0, 10, 20]
+        values = [0.0, 2.0, 10.0]          # s = 0.2, 0.8 → 接線 0.5
+        tangent = core.parabola_slope(0.2, 0.8, 10, 10)
+        smooth = core.compute_slopes(times, values, method=core.METHOD_SMOOTH)
+        strict = core.compute_slopes(times, values, method=core.METHOD_STRICT)
+        self.assertAlmostEqual(smooth[1], tangent)
+        self.assertLess(strict[1], tangent)
+
+    def test_smooth_clamps_only_when_tangent_would_overshoot(self):
+        times = [0, 10, 20]
+        values = [0.0, 0.5, 10.0]          # s = 0.05, 0.95 → 接線 0.5 > 3×0.05
+        tangent = core.compute_slopes(times, values,
+                                      method=core.METHOD_TANGENT)
+        self.assertGreater(core.max_overshoot(times, values, tangent), 0.0)
+        smooth = core.compute_slopes(times, values, method=core.METHOD_SMOOTH)
+        self.assertAlmostEqual(smooth[1], 0.15)
+        self.assertLessEqual(core.max_overshoot(times, values, smooth), 1e-9)
+
+    def test_tangent_method_still_flattens_extremes(self):
+        slopes = core.compute_slopes([0, 10, 20, 30], [0, 10, -5, 3],
+                                     method=core.METHOD_TANGENT)
+        self.assertEqual(slopes[1:3], [0.0, 0.0])
 
     def test_end_modes(self):
         times, values = [0, 10, 20], [0.0, 10.0, 15.0]
@@ -92,6 +131,8 @@ class SlopeCase(unittest.TestCase):
             core.compute_slopes([0, 1], [1])
         with self.assertRaises(ValueError):
             core.compute_slopes([0, 1], [1, 2], end_mode="spline")
+        with self.assertRaises(ValueError):
+            core.compute_slopes([0, 1], [1, 2], method="spline")
 
     def test_plan_keeps_neighbours_but_returns_targets_only(self):
         times, values = [0, 10, 20, 30], [0.0, 4.0, 6.0, 10.0]

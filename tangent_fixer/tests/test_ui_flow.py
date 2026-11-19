@@ -103,8 +103,9 @@ class FixFlowCase(unittest.TestCase):
         _bootstrap.reset_registry()
         self.module = _bootstrap.reload_tool()
 
-    def _expected(self, curve, mode=core.END_FLAT):
-        slopes = core.compute_slopes(curve.times, curve.values, end_mode=mode)
+    def _expected(self, curve, mode=core.END_FLAT, method=core.METHOD_SMOOTH):
+        slopes = core.compute_slopes(curve.times, curve.values, end_mode=mode,
+                                     method=method)
         return [math.degrees(math.atan(m * curve.scale)) for m in slopes]
 
     def test_selected_keys_only_with_measured_scale(self):
@@ -134,6 +135,16 @@ class FixFlowCase(unittest.TestCase):
         expected = self._expected(curve, core.END_NATURAL)
         for i in range(3):
             self.assertAlmostEqual(curve.oa[i], expected[i])
+
+    def test_method_is_passed_through(self):
+        curve = _FakeCurve([0, 10, 20], [0.0, 0.5, 10.0], scale=24.0,
+                           selected=[1])
+        scene = _FakeScene({"c1": curve})
+        with scene.patch():
+            summary = self.module.fix(method=core.METHOD_TANGENT)
+        self.assertAlmostEqual(
+            curve.oa[1], self._expected(curve, method=core.METHOD_TANGENT)[1])
+        self.assertIn("tangent", summary)
 
     def test_stepped_keys_are_left_alone(self):
         curve = _FakeCurve([0, 10, 20, 30], [0.0, 5.0, 8.0, 10.0], scale=24.0,

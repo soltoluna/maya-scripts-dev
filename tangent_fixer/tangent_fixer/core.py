@@ -16,14 +16,15 @@ Maya の非ウェイトタンジェントはハンドル長が区間の 1/3 固�
   カーブがわずかに歪む
 * **Spline**: 左右の平均傾きをそのまま使うので、キーに無いオーバーシュートが出る
 
-ここでは **Steffen 法**（M. Steffen, 1990, "A simple method for monotonic
-interpolation in one dimension"）を使う。 性質:
+各キーの傾きは**前後のキーを通る放物線の接線**を基本にする
+（Steffen 法, 1990 と同じ出発点）。 性質:
 
-1. **キー間で単調** — 隣り合う 2 キーの値の範囲から曲線がはみ出さない
-   （= キーとして打っていないオーバーシュートが出ない）
+1. **接線になる** — 中間キーのタンジェントは、前後のキーを滑らかに通る
+   曲線のその点での接線。 キー間隔の不均一も重みで考慮する
 2. **極値のキーは自動でフラット** — 前後の区間の傾きの符号が変わるキーは 0
-3. **キー間隔の不均一を考慮した加重平均** — 中間キーは前後のキーを結ぶ
-   放物線の傾きを使うので、Auto のような左右非対称の歪みが出ない
+3. **はみ出さない（`smooth` / `strict`）** — 接線が区間の傾きの 3 倍
+   （`strict` は 2 倍）を超えるときだけ頭打ちにする。 Fritsch–Carlson の
+   十分条件で、両端キーの値の範囲から曲線が出ない
 4. **C1 連続** — 入出力の傾きを同じにするので、キー位置で折れない
 """
 
@@ -78,40 +79,79 @@ def _validate(times, values):
                              % (i, times[i], times[i + 1]))
 
 
-def _interior_slope(s_prev, s_next, h_prev, h_next):
-    """内側のキーの傾き（Steffen 法）。
+# 傾きの頭打ちの倍率（区間の傾きに対して）。 Fritsch–Carlson の十分条件で、
+# 区間の両端の傾きがどちらも区間の傾きの 3 倍以内なら、その区間の曲線は
+# 両端キーの値の範囲からはみ出さない。 Steffen 法の原論文は 2 倍だが、
+# 2 倍は必要以上に強く、片側が緩い区間で接線が寝て「歪み」に見える
+_LIMIT_SMOOTH = 3.0
+_LIMIT_STRICT = 2.0
 
-    p は前後の区間の傾きを**区間長で重み付けした**平均（前後のキーを通る
-    放物線のキー位置での傾き）。 それを左右の区間の傾きの 2 倍で頭打ちに
-    すると、隣のキーの値を越えないことが保証される。 前後で傾きの符号が
-    変わる（= 極値）か、どちらかが 0 なら 0。
+
+def parabola_slope(s_prev, s_next, h_prev, h_next):
+    """前後のキーを通る放物線の、キー位置での傾き（= その点の接線）。
+
+    前後の区間の傾きを**相手側の区間長**で重み付けした平均。 キー間隔が
+    不均一でも、3 キーを滑らかに通る曲線の接線になる。
+    """
+    return (s_prev * h_next + s_next * h_prev) / (h_prev + h_next)
+
+
+def _clamp(p, s_prev, s_next, limit):
+    """`p` を左右の区間の傾きの `limit` 倍で頭打ちにする（`None` なら素通し）。"""
+    if limit is None:
+        return p
+    bound = limit * min(abs(s_prev), abs(s_next))
+    return p if abs(p) <= bound else _sign(p) * bound
+
+
+def _interior_slope(s_prev, s_next, h_prev, h_next, limit):
+    """内側のキーの傾き。
+
+    前後で傾きの符号が変わる（= 極値）か、どちらかが平らなら 0。
+    それ以外は放物線の接線を、`limit` が与えられていれば頭打ちにして使う。
     """
     if s_prev * s_next <= 0.0:
         return 0.0
-    p = (s_prev * h_next + s_next * h_prev) / (h_prev + h_next)
-    limit = min(abs(s_prev), abs(s_next), 0.5 * abs(p))
-    return (_sign(s_prev) + _sign(s_next)) * limit
+    return _clamp(parabola_slope(s_prev, s_next, h_prev, h_next),
+                  s_prev, s_next, limit)
 
 
-def _natural_end_slope(s_near, s_far, h_near, h_far):
-    """端のキーの傾き（Steffen 法の端点の式）。
+def _natural_end_slope(s_near, s_far, h_near, h_far, limit):
+    """端のキーの傾き。
 
-    端から 3 キーを通る放物線の端点での傾き。 区間の傾きと符号が逆なら 0、
-    2 倍を超えるなら 2 倍で頭打ちにする（どちらも隣のキーを越えないため）。
+    端から 3 キーを通る放物線の端点での傾き。 区間の傾きと符号が逆なら 0
+    （逆向きに出るとはみ出す）。 `limit` があれば区間の傾きの倍数で頭打ち。
     """
     p = s_near * (1.0 + h_near / (h_near + h_far)) - s_far * h_near / (h_near + h_far)
     if p * s_near <= 0.0:
         return 0.0
-    if abs(p) > 2.0 * abs(s_near):
-        return 2.0 * s_near
+    if limit is not None and abs(p) > limit * abs(s_near):
+        return limit * s_near
     return p
 
 
-def compute_slopes(times, values, end_mode=END_FLAT, epsilon=SLOPE_EPSILON):
+METHOD_SMOOTH = "smooth"     # 接線を優先し、はみ出す分だけ頭打ち（既定）
+METHOD_TANGENT = "tangent"   # 接線そのもの。 極値だけ水平（わずかにはみ出し得る）
+METHOD_STRICT = "strict"     # Steffen 法の原式（v0.1.0 の挙動）
+METHODS = (METHOD_SMOOTH, METHOD_TANGENT, METHOD_STRICT)
+
+_METHOD_LIMIT = {METHOD_SMOOTH: _LIMIT_SMOOTH, METHOD_TANGENT: None,
+                 METHOD_STRICT: _LIMIT_STRICT}
+
+
+def compute_slopes(times, values, end_mode=END_FLAT, method=METHOD_SMOOTH,
+                   epsilon=SLOPE_EPSILON):
     """各キーのタンジェントの傾き（値 / 時間）を返す。
 
     入出力は同じ傾き（C1 連続）にするので、1 キーに 1 つの値を返す。
     単位は `times` と `values` の単位そのまま（フレームを渡せば 値/フレーム）。
+
+    method:
+        * `smooth`  — 前後のキーを通る放物線の接線。 区間の傾きの 3 倍を
+          超えるとはみ出すので、そのときだけ頭打ち（はみ出し 0 を保証）
+        * `tangent` — 放物線の接線そのもの。 極値だけ水平。 隣のキーとの
+          傾きの差が大きい箇所ではわずかにはみ出すことがある
+        * `strict`  — Steffen 法の原式（2 倍で頭打ち。 v0.1.0 の挙動）
 
     >>> compute_slopes([0, 10, 20], [0, 10, 0])    # 山の頂点はフラット
     [0.0, 0.0, 0.0]
@@ -120,6 +160,9 @@ def compute_slopes(times, values, end_mode=END_FLAT, epsilon=SLOPE_EPSILON):
     """
     if end_mode not in END_MODES:
         raise ValueError("end_mode は %r のどれか: %r" % (END_MODES, end_mode))
+    if method not in METHODS:
+        raise ValueError("method は %r のどれか: %r" % (METHODS, method))
+    limit = _METHOD_LIMIT[method]
     n = len(times)
     _validate(times, values)
     if n < 2:
@@ -130,17 +173,16 @@ def compute_slopes(times, values, end_mode=END_FLAT, epsilon=SLOPE_EPSILON):
 
     slopes = [0.0] * n
     for i in range(1, n - 1):
-        slopes[i] = _interior_slope(s[i - 1], s[i], h[i - 1], h[i])
+        slopes[i] = _interior_slope(s[i - 1], s[i], h[i - 1], h[i], limit)
 
     if end_mode == END_NATURAL:
         if n == 2:
             slopes[0] = slopes[1] = s[0]       # 2 キーだけなら直線
         else:
-            slopes[0] = _natural_end_slope(s[0], s[1], h[0], h[1])
+            slopes[0] = _natural_end_slope(s[0], s[1], h[0], h[1], limit)
             # 右端は左右を入れ替えた同じ式（向きを反転しても符号は相殺する）
-            slopes[-1] = _natural_end_slope(s[-1], s[-2], h[-1], h[-2])
+            slopes[-1] = _natural_end_slope(s[-1], s[-2], h[-1], h[-2], limit)
     return [0.0 if abs(m) < epsilon else m for m in slopes]
-
 
 # --------------------------------------------------------------------------- #
 # 検算（テストと調査関数で使う）
@@ -277,7 +319,8 @@ def segment_for(index, side):
     return index if side == "out" else index - 1
 
 
-def plan_curve(times, values, target_indices=None, end_mode=END_FLAT):
+def plan_curve(times, values, target_indices=None, end_mode=END_FLAT,
+               method=METHOD_SMOOTH):
     """1 本のカーブに対して「どのキーをどの傾きにするか」を返す。
 
     `target_indices` が None なら全キー。 対象外のキーも傾きの計算には使う
@@ -285,7 +328,7 @@ def plan_curve(times, values, target_indices=None, end_mode=END_FLAT):
 
     戻り値: `[(index, slope_per_frame), ...]`（index 昇順）
     """
-    slopes = compute_slopes(times, values, end_mode=end_mode)
+    slopes = compute_slopes(times, values, end_mode=end_mode, method=method)
     if target_indices is None:
         targets = range(len(times))
     else:
