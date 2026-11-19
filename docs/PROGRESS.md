@@ -10,6 +10,27 @@
   「実装済み・実機未確認」が常態になる。どの版がどこまで確認済みかを追えるようにする
 -->
 
+## 2026-11-19
+
+- やったこと: **新規ツール `blendshape_manager`（Rigging, シェルフ `BSManager`）を
+  v0.1.0 で作成**（push 済み `0a09ee3`）。 作成 / ノード選択 / ターゲット一覧
+  （チェック + `attrFieldSliderGrp` + 絞り込み）/ 追加・削除 / ウェイト一括 /
+  リネーム（単体・一括、入れ替えは一時名経由）/ インビトウィーン / ミラー
+  （`L_`↔`R_` 等、blendShape の出力を読んで `core` で反転）。 `scene.diagnose()` 同梱。
+- 現状: **v0.1.0 は実機未確認（Maya 2024 / 2025 とも）。** 自宅ではテスト 57 件
+  （core・`scene` を差し替えた UI 往復）と check_tools 0 error まで。 `scene.py` は
+  一度も実行されていない。
+  **未確認（待ち行列）**: `blendshape_manager` v0.1.0 の SPEC.md「実装状況 v0.1.0」の
+  4 項目（`blendShapeDeleteTargetGroup` の呼び出し形 / `aliasAttr` の付け替え /
+  ミラーの出力読み取りと上書き / スライダー行の見た目）。
+- 次回: 実機で作成 → スライダー → リネーム（入れ替え含む）→ インビトウィーン →
+  ミラー → 削除 → undo を 2024 / 2025 両方で。 外れたら `scene.diagnose("<ノード>")`
+  の出力をもらって直す。 `penetration_checker` / `color_override` の待ち行列は
+  下の項のまま。
+- メモ: ミラーを Maya の `flipTarget` / `mirrorTarget` に任せなかったのは、計算を
+  自宅でテストでき、スキン等の影響を受けないため（SPEC.md 設計判断）。 ベースが
+  左右対称でないと対応が取れないのは既知の制約。
+
 ## 2026-11-17
 
 - やったこと: **新規ツール `penetration_checker`（Animation）を作成し、v0.2.0 まで進めた**
