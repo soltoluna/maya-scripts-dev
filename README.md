@@ -6,12 +6,12 @@
 |---|---|---|---|---|---|
 | [blendshape_manager](blendshape_manager/) | Rigging | 0.1.0 | 2024+ | シェルフ `BSManager` | ブレンドシェイプの作成・ターゲットの追加 / 削除・ウェイト操作・リネーム（一括を含む）・インビトウィーンの追加・左右反転したターゲットの作成を 1 つのウィンドウで行う（**実機未確認**） |
 | [color_override](color_override/) | Utility | 1.1.0 | 2024+ | シェルフ `ColorOvr` | 選択物を任意の色でフラットに塗り分け、同系色のオブジェクトの貫通をビューポートで見分ける。v1.0.0 からレンダーセットアップのマテリアルオーバーライドで掛けるので**元の割り当てを触らない**（**v1.0.1 は実機で不具合あり・v1.0.2 で調査中**） |
-| [constraint_inspector](constraint_inspector/) | Rigging | 0.1.0 | 2024+ | シェルフ `ConstInsp`（アイコン） | シーン／指定ノード以下のコンストレインを一覧・絞り込みし、ドリブン・ドライバー・コンストレインノードを選択する。PySide2/6 両対応（**実機未確認**） |
+| [constraint_inspector](constraint_inspector/) | Rigging | 0.1.0 | 2024+ | シェルフ `ConstInsp`（アイコン） | シーン／指定ノード以下のコンストレインを一覧・絞り込みし、ドリブン・ドライバー・コンストレインノードを選択する。PySide2/6 両対応（実機で配布・登録を確認済み・2025 での動作は要確認） |
 | [deselect_static](deselect_static/) | Animation | 0.1.0 | 2024+ | シェルフ `DeselStat` | 選択オブジェクトのうちキーの値が変化しないものの選択を外し、動いているものだけを残す。Graph Editor でキーを選択していればそのキーだけで判定（v0.1.0 は 2024 で実機確認済み・2025 未確認） |
 | [penetration_checker](penetration_checker/) | Animation | 0.2.0 | 2024+ | シェルフ `PenetChk` | 指定したオブジェクト／グループ配下のメッシュ同士のめり込みを、現在のフレーム・タイムスライダーの範囲・再生しながらの 3 通りで調べ、めり込み区間と最も効いているコントローラー（無ければジョイント）を HUD と一覧に出す（**実機未確認**） |
-| [scene_timewarp_hud](scene_timewarp_hud/) | Animation | 0.1.0 | 2024+ | シェルフ `TWarpHUD`（押すたびに表示切替） | シーンタイムワープの ON / OFF をビューポート HUD に出し、ON のときは赤くする（**実機未確認**） |
+| [scene_timewarp_hud](scene_timewarp_hud/) | Animation | 0.1.0 | 2024+ | シェルフ `TWarpHUD`（押すたびに表示切替） | シーンタイムワープの ON / OFF をビューポート HUD に出し、ON のときは赤くする（実機で配布・登録を確認済み） |
 | [tangent_fixer](tangent_fixer/) | Animation | 0.3.0 | 2024+ | シェルフ `TanFixer` | Fカーブのタンジェントを、キーの前後で曲率までなめらかにつなぎ・極値はフラットにし、キーに無いオーバーシュートを作らない形に一括で直す（v0.3.0 実機確認済み） |
-| [toon_outline_manager](toon_outline_manager/) | Rendering | 0.1.0 | 2024+ | シェルフ `ToonOutln`（アイコン） | Paint Effects のトゥーンアウトラインを追加し、線幅・表示・ボーダーライン・スクリーンスペース幅を一覧からまとめて操作する。PySide2/6 両対応（**実機未確認**） |
+| [toon_outline_manager](toon_outline_manager/) | Rendering | 0.1.0 | 2024+ | シェルフ `ToonOutln`（アイコン） | Paint Effects のトゥーンアウトラインを追加し、線幅・表示・ボーダーライン・スクリーンスペース幅を一覧からまとめて操作する。PySide2/6 両対応（実機で配布・登録を確認済み・2025 での動作は要確認） |
 | [unload_reference_delete](unload_reference_delete/) | Reference | 0.2.0 | 2024+ | シェルフ `UnldRefDel` | アンロード中のリファレンスを一覧してまとめて削除（**実機未確認**） |
 
 **配布はリポジトリ直下の [`install.py`](install.py) 1 本**。 これを

@@ -10,6 +10,22 @@
   「実装済み・実機未確認」が常態になる。どの版がどこまで確認済みかを追えるようにする
 -->
 
+## 2026-11-19（既存 3 本の標準セット化・シェルフアイコン）
+
+- やったこと: **単体スクリプト 3 本を標準セット化し、ハブから配布・シェルフ登録
+  されるようにした**（push 済み `4478180` / `98131a5`）。 `constraint_inspector`
+  （旧 `ConstrainInspector`）・`toon_outline_manager`・`scene_timewarp_hud`
+  （旧 `TimewarpHUD`）を v0.1.0 に。 PySide の 2 本は `qt.py` shim で PySide2/6 両対応。
+  TimewarpHUD はシェルフボタンで HUD 表示を切り替え。 ハブはパッケージ直下の
+  `icon.png` をシェルフアイコンに使うようにした。
+- 現状: **3 本とも実機で「GitHub から更新」→ 登録されることを確認済み**（ユーザー報告）。
+  確認した Maya の版（2024 / 2025）と、各ツールの機能まで動かしたかは記録なし。
+  自宅ではテスト全件と check_tools 0 error（warn 2: PySide 2 本に `core.py` 無し）。
+- 次回: PySide の 2 本を **2025（PySide6）で開けるか**未確認ならそれを確認。
+  TimewarpHUD の切り替えで文字色が戻るか。 `MgearToDWpicker` は未着手（2025 不可のまま）。
+- メモ: 最初「登録されない」と報告があった原因は**未 push**（ハブは GitHub の main を見る）。
+  既存の単体版 `.py` が別フォルダに残ると古い方が読まれ得るので、利用者には削除を案内した。
+
 ## 2026-11-19（deselect_static）
 
 - やったこと: **新規ツール `deselect_static`（Animation, シェルフ `DeselStat`）を
@@ -212,21 +228,3 @@
   着手時にユーザーへ確認する。 チーム共通の接頭辞が要る場合は CLAUDE.md「ルール」の
   末尾に手順を書いてある（optionVar 検査を 1 行直すだけ）。
 
-## 2026-08-15
-- やったこと: **ワークスペースを新規作成した**（`D:\maya\scripts\dev`）。 Blender 側
-  （`D:\BlenderData\addons\dev`）の運用をそのまま持ち込み、Maya 向けに置き換えた —
-  雛形（`install.py` + パッケージ + テスト）、`maya.cmds` スタブ、`tools/check_tools.py`、
-  スラッシュコマンド 5 本、レビュー用サブエージェント 6 本。 手元の
-  `maya-hot-update-patterns.md` を `docs/MAYA_HOT_UPDATE_PATTERNS.md` として取り込み、
-  その §1-10（`_REMOTE_FILES` の追記忘れ）を**テストと checker で機械検出**にした。
-- 現状: 雛形のテスト 17 件パス、`check_tools.py` 0 error。 リポジトリは
-  `soltoluna/maya-scripts-dev`（**public**）。 ツールはまだ 1 本も無い。
-  **実機（会社の Maya）での検証はゼロ** — ドラッグ&ドロップも更新ボタンも、
-  この仕組みが実機で通るかはまだ誰も見ていない。
-- 次回: (1) `/new-tool` で最初のツールを 1 本作る、(2) **会社の Maya（2024 か 2025）で
-  install.py のドラッグ&ドロップと「GitHub から更新」を通す**。 ここが通るまでは全部が机上。
-- メモ: 対応 Maya は **2024 / 2025 の両対応**で、判断は下限の 2024（Python 3.10）に
-  合わせる。 **PySide は使わない方針** — 2024=PySide2 / 2025=PySide6 で import 名から
-  互換が無く、`cmds` なら 1 本のコードが両方で動くため。 public にしたのは
-  `install.py` の更新機能が GitHub を**匿名で**叩く設計だから（private だと会社 PC 側に
-  トークンを置く仕組みが要る）。
