@@ -5,10 +5,13 @@
 「カーブからキーを読む → `core.plan_curve` に渡す → 返ってきた傾きを
 タンジェント角にして書く」だけ。
 
-**角度の単位は実機で確定していない**ので、カーブごとに 1 区間だけ
-タンジェントを Linear にして角度を実測し、倍率を逆算してから書く
+**角度の単位は実機で確定していない**ので、カーブの型ごとに一時カーブを
+作って Linear の角度を実測し、倍率を逆算してから書く
 （`core.scale_from_measurement`）。 測れないときは秒基準の仮定
 （`core.default_angle_scale`）に落とし、止めずに続ける。
+
+**ユーザーのキーには、最終結果以外の変更を入れない**（v0.2.1）。 途中で
+Maya が暗黙に break したタンジェントは undo で戻らない。
 """
 
 from __future__ import annotations
@@ -80,40 +83,57 @@ def _fps():
 # 書き込み
 # --------------------------------------------------------------------------- #
 
-def _measure_scale(curve, times, values, target_indices):
-    """カーブ 1 本の「傾き → 角度」の倍率を実測する。 測れなければ None。
+def _measure_scale(node_type):
+    """カーブの型ごとの「傾き → 角度」の倍率を、**一時カーブで**実測する。
 
-    対象キーのどれかのタンジェントを一時的に Linear にして角度を読む。
-    対象キーはこの後すぐに上書きするので後片付けは要らない。
+    同じ型の animCurve を作り、2 キーを打って出力タンジェントを Linear に
+    すると、隣のキーへの直線になる。 その角度と、読み戻した 2 キーの傾きから
+    倍率を逆算する（`core.scale_from_measurement`）。
+
+    v0.2.0 までは**ユーザーのキー**を一時的に Linear にして測っていたが、
+    入出力の型が食い違った瞬間に Maya がタンジェントを break し、その
+    暗黙の変更が undo で戻らなかった（Ctrl+Z 後に break 状態が残る）。
+    ユーザーのキーには測定のための変更を一切入れない。
+
+    測れなければ None（呼び出し側が秒基準の仮定に落とす）。
     """
-    seg = core.segment_slopes(times, values)
-    pick = core.pick_calibration_segment(seg, target_indices)
-    if pick is None:
-        return None
-    index, side = pick
-    if side == "out":
-        cmds.keyTangent(curve, edit=True, index=(index, index),
+    temp = None
+    try:
+        temp = cmds.createNode(node_type, skipSelect=True,
+                               name=_NS + "_calib")
+        cmds.setKeyframe(temp, time=0, value=0.0)
+        cmds.setKeyframe(temp, time=10, value=1.0)
+        times = cmds.keyframe(temp, q=True, timeChange=True) or []
+        values = cmds.keyframe(temp, q=True, valueChange=True) or []
+        if len(times) != 2 or len(values) != 2:
+            return None
+        cmds.keyTangent(temp, edit=True, index=(0, 0),
                         outTangentType="linear")
-        angle = cmds.keyTangent(curve, q=True, index=(index, index),
-                                outAngle=True)
-    else:
-        cmds.keyTangent(curve, edit=True, index=(index, index),
-                        inTangentType="linear")
-        angle = cmds.keyTangent(curve, q=True, index=(index, index),
-                                inAngle=True)
-    if not angle:
+        angle = cmds.keyTangent(temp, q=True, index=(0, 0), outAngle=True)
+        if not angle:
+            return None
+        slope = core.segment_slopes(times, values)[0]
+        return core.scale_from_measurement(float(angle[0]), slope)
+    except Exception as exc:   # 測れないだけで主機能は止めない
+        _log("calibration failed for %s: %s" % (node_type, exc))
         return None
-    return core.scale_from_measurement(float(angle[0]),
-                                       seg[core.segment_for(index, side)])
+    finally:
+        if temp and cmds.objExists(temp):
+            cmds.delete(temp)
 
 
-def _fix_curve(curve, target_indices, end_mode, fallback_scale,
+def _fix_curve(curve, target_indices, end_mode, scale,
                method=core.METHOD_SMOOTH):
-    """1 本のカーブを直す。 `(書き換えたキー数, 段差で飛ばした数, 倍率, 実測か)`。"""
+    """1 本のカーブを直す。 `(書き換えたキー数, 段差で飛ばした数)`。
+
+    **ロックは変えなくて済むなら触らない。** 元からロックされているキーは
+    入出力に同じ角度を書くだけでロックが保たれる。 break されていたキーだけ
+    最後に明示的に lock する（明示的な変更なので undo で break に戻る）。
+    """
     times = cmds.keyframe(curve, q=True, timeChange=True) or []
     values = cmds.keyframe(curve, q=True, valueChange=True) or []
     if len(times) < 2:
-        return 0, 0, None, False
+        return 0, 0
 
     plan = core.plan_curve(times, values, target_indices, end_mode=end_mode,
                            method=method)
@@ -122,22 +142,18 @@ def _fix_curve(curve, target_indices, end_mode, fallback_scale,
                if i < len(out_types) and out_types[i] in _SKIP_OUT_TYPES]
     plan = [(i, m) for i, m in plan if i not in skipped]
     if not plan:
-        return 0, len(skipped), None, False
+        return 0, len(skipped)
 
-    scale = _measure_scale(curve, times, values, [i for i, _ in plan])
-    measured = scale is not None
-    if not measured:
-        scale = fallback_scale
-
+    locks = cmds.keyTangent(curve, q=True, lock=True) or []
     for index, slope in plan:
         angle = core.slope_to_angle(slope, scale)
         cmds.keyTangent(curve, edit=True, index=(index, index),
                         inTangentType="fixed", outTangentType="fixed")
         cmds.keyTangent(curve, edit=True, absolute=True, index=(index, index),
                         inAngle=angle, outAngle=angle)
-        cmds.keyTangent(curve, edit=True, index=(index, index), lock=True)
-    return len(plan), len(skipped), scale, measured
-
+        if not (index < len(locks) and locks[index]):
+            cmds.keyTangent(curve, edit=True, index=(index, index), lock=True)
+    return len(plan), len(skipped)
 
 def fix(end_mode=None, method=None):
     """選択キー（無ければ選択オブジェクトの全キー）のタンジェントを直す。
@@ -161,27 +177,30 @@ def fix(end_mode=None, method=None):
     n_curves = n_keys = n_skipped = 0
     weighted = []
     failed = []
-    unmeasured = []
+    scales = {}   # カーブの型 → (倍率, 実測か)
     cmds.undoInfo(openChunk=True, chunkName="%s fix" % (_PACKAGE,))
     try:
         for curve, indices in targets:
             try:
-                keys, skipped, scale, measured = _fix_curve(
-                    curve, indices, end_mode, fallback, method)
+                node_type = cmds.nodeType(curve)
+                if node_type not in scales:
+                    measured = _measure_scale(node_type)
+                    scales[node_type] = ((measured, True) if measured
+                                         else (fallback, False))
+                    _log("%s: scale=%.6g (%s, default=%.6g)"
+                         % (node_type, scales[node_type][0],
+                            "measured" if measured else "fallback", fallback))
+                keys, skipped = _fix_curve(curve, indices, end_mode,
+                                           scales[node_type][0], method)
             except Exception as exc:   # 1 本の失敗で全体を止めない
                 failed.append((curve, exc))
                 continue
             if keys:
                 n_curves += 1
                 n_keys += keys
-                if not measured:
-                    unmeasured.append(curve)
                 if (cmds.keyTangent(curve, q=True, weightedTangents=True)
                         or [False])[0]:
                     weighted.append(curve)
-                _log("%s: %d key(s), scale=%.6g (%s, default=%.6g)"
-                     % (curve, keys, scale,
-                        "measured" if measured else "fallback", fallback))
             n_skipped += skipped
     finally:
         cmds.undoInfo(closeChunk=True)
@@ -282,47 +301,82 @@ def probe(try_it=False):
     return text
 
 
-def _probe_try(fps):
-    """一時ノードに直線と山のキーを打ち、実測と書き込み結果を出して消す。"""
-    lines = ["--- try_it ---"]
-    node = None
-    cmds.undoInfo(openChunk=True, chunkName="%s probe" % (_PACKAGE,))
-    try:
-        node = cmds.createNode("transform", name=_PROBE_NODE)
-        keys = {"translateX": [(0, 0.0), (24, 10.0)],
-                "rotateX": [(0, 0.0), (24, 90.0)],
-                "translateY": [(0, 0.0), (10, 10.0), (20, 9.0), (30, 0.0)]}
-        for attr, pairs in keys.items():
-            for t, v in pairs:
-                _safe(cmds.setKeyframe, node, attribute=attr, time=t, value=v,
-                      inTangentType="linear", outTangentType="linear")
-        for attr in ("translateX", "rotateX"):
-            curve = (_safe(cmds.keyframe, node, attribute=attr, q=True,
-                           name=True) or ["?"])
-            curve = curve[0] if isinstance(curve, list) else curve
-            lines.extend(_probe_curve(curve, fps, max_keys=2))
+def _tangent_state(curve):
+    """キーごとの (inType, outType, inAngle, outAngle, lock) のリスト。"""
+    cols = []
+    for flag in ("inTangentType", "outTangentType", "inAngle", "outAngle",
+                 "lock"):
+        cols.append(_safe(cmds.keyTangent, curve, q=True, **{flag: True}))
+    if any(not isinstance(c, list) for c in cols):
+        return cols
+    return [tuple(row) for row in zip(*cols)]
 
-        ty = _safe(cmds.keyframe, node, attribute="translateY", q=True,
-                   name=True)
-        if isinstance(ty, list) and ty:
-            curve = ty[0]
-            result = _safe(_fix_curve, curve, None, core.END_FLAT,
-                           core.default_angle_scale(fps))
-            lines.append("  fix translateY -> %r" % (result,))
-            lines.extend(_probe_curve(curve, fps, max_keys=4))
-            samples = []
-            for t in (5, 12, 15, 18, 25):
-                samples.append((t, _safe(cmds.keyframe, curve, q=True,
-                                         eval=True, time=(t, t))))
-            lines.append("  eval (keys 0,10,9,0 @ 0,10,20,30): %r" % (samples,))
+
+def _same_state(a, b, tol=1e-3):
+    if len(a) != len(b):
+        return False
+    for row_a, row_b in zip(a, b):
+        if not isinstance(row_a, tuple) or not isinstance(row_b, tuple):
+            if row_a != row_b:
+                return False
+            continue
+        for x, y in zip(row_a, row_b):
+            if isinstance(x, float) and isinstance(y, float):
+                if abs(x - y) > tol:
+                    return False
+            elif x != y:
+                return False
+    return True
+
+
+def _probe_try(fps):
+    """一時ノードで、倍率の実測・書き込み・**undo で元に戻るか**を確かめて消す。
+
+    undo の確認のため、ノード作成とキー打ちは Fix の undo チャンクの外で行い、
+    `cmds.undo()` で Fix だけを取り消す。
+    """
+    lines = ["--- try_it ---"]
+    for node_type in ("animCurveTL", "animCurveTA", "animCurveTU"):
+        lines.append("  calib %s: scale=%r (default sec=%r)" % (
+            node_type, _safe(_measure_scale, node_type), fps))
+
+    node = None
+    try:
+        node = cmds.createNode("transform", name=_PROBE_NODE, skipSelect=True)
+        for t, v in ((0, 0.0), (10, 10.0), (20, 9.0), (30, 0.0)):
+            cmds.setKeyframe(node, attribute="translateY", time=t, value=v,
+                             inTangentType="auto", outTangentType="auto")
+        curve = cmds.keyframe(node, attribute="translateY", q=True,
+                              name=True)[0]
+        # 1 キーだけ break して、break の状態も undo で戻るかを見る
+        cmds.keyTangent(curve, edit=True, index=(2, 2), lock=False)
+        before = _tangent_state(curve)
+        lines.append("  before: %r" % (before,))
+
+        cmds.undoInfo(openChunk=True, chunkName="%s probe fix" % (_PACKAGE,))
+        try:
+            scale = _measure_scale(cmds.nodeType(curve)) or \
+                core.default_angle_scale(fps)
+            lines.append("  fix -> %r" % (
+                _safe(_fix_curve, curve, None, core.END_FLAT, scale),))
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        lines.append("  after : %r" % (_tangent_state(curve),))
+        samples = [(t, _safe(cmds.keyframe, curve, q=True, eval=True,
+                             time=(t, t))) for t in (5, 12, 15, 18, 25)]
+        lines.append("  eval (keys 0,10,9,0 @ 0,10,20,30): %r" % (samples,))
+
+        _safe(cmds.undo)
+        restored = _tangent_state(curve)
+        lines.append("  undone: %r" % (restored,))
+        lines.append("  UNDO %s" % ("MATCH" if _same_state(before, restored)
+                                    else "DIFF"))
     except Exception as exc:
         lines.append("  <ERROR %s: %s>" % (type(exc).__name__, exc))
     finally:
         if node and cmds.objExists(node):
             _safe(cmds.delete, node)
-        cmds.undoInfo(closeChunk=True)
     return lines
-
 
 # --------------------------------------------------------------------------- #
 # ウィンドウ
