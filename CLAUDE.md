@@ -57,16 +57,18 @@ Maya 用 Python ツールを**自宅（Maya 無し）で開発し、GitHub 経�
 
 ### 既存スクリプト（標準セット化前のフォルダ）
 
-`ConstrainInspector` / `PlayblastTool` / `toon_outline_manager` などは、
+`MgearToDWpicker` / `PlayblastTool` / `SelectedReferenceDelete` は、
 標準セット化する前から使っている**単体スクリプト**。 `install.py` もテストも
 無く、`tools/check_tools.py` の対象外（**`install.py` か同名パッケージがある
 フォルダだけ**を検査する。 名前で判別しないのは接頭辞を付けない方針のため）。 手を入れるときは
 `/scaffold` で標準セットに載せてから触る。
 
-**そのうち 3 本（`ConstrainInspector` / `MgearToDWpicker` / `toon_outline_manager`）は
-`PySide2` + `shiboken2` を直接 import しており、Maya 2025 では import に失敗する。**
-**この 3 本は `cmds` へ書き直さず、PySide のまま両対応にする**（2026-08-16 決定。
-既にあるレイアウトを崩したくないため）。手順は下の「PySide2/6 両対応 shim」。
+**PySide で書かれた既存ツールは `cmds` へ書き直さず、PySide のまま両対応にする**
+（2026-08-16 決定。既にあるレイアウトを崩したくないため）。手順は下の
+「PySide2/6 両対応 shim」。 `constraint_inspector` / `toon_outline_manager` は
+2026-11-19 に標準セット化と同時に shim を入れた（実例として参照できる。
+テストは `tests/_qt_stub.py` で PySide をスタブして `show()` まで通す）。
+**残る `MgearToDWpicker` はまだ `PySide2` を直接 import しており、Maya 2025 では動かない。**
 
 ### PySide2/6 両対応 shim
 

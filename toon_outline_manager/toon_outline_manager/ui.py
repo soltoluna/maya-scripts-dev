@@ -1,13 +1,20 @@
-# toon_outline_manager.py
-# Maya 2024 - Toon Outline Manager (PySide2)
-# Usage: Run in Maya's Script Editor (Python tab), or import and call build_ui()
+# -*- coding: utf-8 -*-
+# Toon Outline Manager — UI 本体
+# Maya 2024 (PySide2) / 2025+ (PySide6)。 Qt は必ず `.qt` から import する
+# 起動: `import toon_outline_manager; toon_outline_manager.show()`
+#       （従来の `build_ui()` も別名として残してある）
 
 import maya.cmds as cmds
 import maya.mel as mel
-from maya.app.general.mayaMixin import MayaQWidgetDockableMixin
 
-from PySide2 import QtWidgets, QtCore, QtGui
-from PySide2.QtCore import Qt
+from . import NAMESPACE, __version__
+from .qt import Qt, QtCore, QtGui, QtWidgets, wrapInstance  # noqa: F401
+
+_PACKAGE = __package__ or __name__.rsplit(".", 1)[0]
+_NS = "%s_%s" % (NAMESPACE, _PACKAGE)     # ntk_toon_outline_manager
+# Qt ウィンドウの objectName。 ハブ install.py が更新前にこの名前で閉じ、
+# show() も同じ名前で取り残しを探す
+WINDOW = _NS + "Win"
 
 # =========================================================================== #
 #  Maya core logic
@@ -521,7 +528,7 @@ class NodeRowWidget(QtWidgets.QFrame):
 class ToonOutlineManager(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Toon Outline Manager")
+        self.setWindowTitle("Toon Outline Manager  v%s" % (__version__,))
         self.setWindowFlags(self.windowFlags() | Qt.Window)
         self.setMinimumWidth(360)
         self.setStyleSheet(STYLE)
@@ -704,6 +711,30 @@ class ToonOutlineManager(QtWidgets.QWidget):
         self.ssSpin.valueChanged.connect(self._on_ss_spin_changed)
         self._ss_updating = False
         self._update_ss_row_enabled()
+
+        root.addWidget(self._make_divider())
+        root.addLayout(self._build_footer())
+
+    def _build_footer(self):
+        """バージョン表示と更新ボタン（cmds 版ツールの `dev_tools.build_footer()` 相当）。
+
+        **バージョンは必ず目に見えるところに出す。** 実機が手元に無いので、
+        「更新が届いたか」を確かめる手段がこの表示しかない。
+        """
+        from . import dev_tools
+
+        row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        version = QtWidgets.QLabel("%s  v%s" % (_PACKAGE, __version__))
+        version.setObjectName("legend")
+        update = QtWidgets.QPushButton("GitHub から更新")
+        update.setToolTip("GitHub の最新版を取得して開き直します。"
+                          "入っているツールは全部まとめて更新されます"
+                          "（Maya の再起動は不要）")
+        update.clicked.connect(lambda *_: dev_tools.update_from_github())
+        row.addWidget(version, 1)
+        row.addWidget(update)
+        return row
 
     # ------------------------------------------------------------------ #
     #  Helpers
@@ -997,23 +1028,28 @@ class ToonOutlineManager(QtWidgets.QWidget):
 # =========================================================================== #
 
 _window_instance = None
-_WINDOW_OBJ_NAME = "ToonOutlineManagerWindow"
 
-def build_ui():
+# 単体スクリプト時代の objectName。 古い版のウィンドウが開いたまま更新された
+# ときにも閉じられるよう、探す対象に残しておく
+_LEGACY_WINDOW_OBJ_NAME = "ToonOutlineManagerWindow"
+
+
+def show():
     global _window_instance
 
     from maya import OpenMayaUI as omui
-    from shiboken2 import wrapInstance
     ptr = omui.MQtUtil.mainWindow()
     maya_main = wrapInstance(int(ptr), QtWidgets.QWidget)
 
-    # 既存ウィンドウをオブジェクト名で検索して確実に閉じる
-    for widget in maya_main.findChildren(QtWidgets.QWidget, _WINDOW_OBJ_NAME):
-        try:
-            widget.close()
-            widget.deleteLater()
-        except Exception:
-            pass
+    # 既存ウィンドウをオブジェクト名で検索して確実に閉じる（ハブの更新は
+    # `sys.modules` を落とすので、モジュール変数だけでは辿れない）
+    for obj_name in (WINDOW, _LEGACY_WINDOW_OBJ_NAME):
+        for widget in maya_main.findChildren(QtWidgets.QWidget, obj_name):
+            try:
+                widget.close()
+                widget.deleteLater()
+            except Exception:
+                pass
     if _window_instance is not None:
         try:
             _window_instance.close()
@@ -1022,11 +1058,11 @@ def build_ui():
             pass
 
     _window_instance = ToonOutlineManager(parent=maya_main)
-    _window_instance.setObjectName(_WINDOW_OBJ_NAME)
+    _window_instance.setObjectName(WINDOW)
     _window_instance.setAttribute(Qt.WA_DeleteOnClose, False)
     _window_instance.show()
     return _window_instance
 
 
-if __name__ == "__main__":
-    build_ui()
+# 単体スクリプト時代の入口名
+build_ui = show

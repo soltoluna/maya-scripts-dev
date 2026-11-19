@@ -1,12 +1,18 @@
-# constraint_inspector.py
-# Maya 2024 - Constraint Inspector Tool
-# コンストレイン一覧・選択支援ツール
+# -*- coding: utf-8 -*-
+# Constraint Inspector — コンストレイン一覧・選択支援ツール（UI 本体）
+# Maya 2024 (PySide2) / 2025+ (PySide6)。 Qt は必ず `.qt` から import する
 
 import maya.cmds as cmds
-from PySide2 import QtWidgets, QtCore, QtGui
-from PySide2.QtCore import Qt
 import maya.OpenMayaUI as omui
-from shiboken2 import wrapInstance
+
+from . import NAMESPACE, __version__
+from .qt import Qt, QtCore, QtGui, QtWidgets, wrapInstance  # noqa: F401
+
+_PACKAGE = __package__ or __name__.rsplit(".", 1)[0]
+_NS = "%s_%s" % (NAMESPACE, _PACKAGE)     # ntk_constraint_inspector
+# Qt ウィンドウの objectName。 ハブ install.py が更新前にこの名前で閉じ、
+# show() も同じ名前で取り残しを探す（モジュールを落とすとインスタンス変数が消えるため）
+WINDOW = _NS + "Win"
 
 # ─── カラーパレット ──────────────────────────────────────────────
 COLORS = {
@@ -645,7 +651,7 @@ class ConstraintDetailPanel(QtWidgets.QWidget):
 class ConstraintInspectorUI(QtWidgets.QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Constraint Inspector  |  Maya 2024")
+        self.setWindowTitle("Constraint Inspector  v%s" % (__version__,))
         self.setMinimumSize(1032, 560)
         self.resize(1200, 640)
         self.setStyleSheet(STYLESHEET)
@@ -813,8 +819,27 @@ class ConstraintInspectorUI(QtWidgets.QMainWindow):
 
         main_layout.addWidget(splitter, 1)
 
-        # ステータスバー
+        # ステータスバー（右端にバージョン表示と「GitHub から更新」）
         self.statusBar().showMessage("ルートノードを指定してスキャンしてください。")
+        self._build_footer()
+
+    def _build_footer(self):
+        """バージョン表示と更新ボタン（cmds 版ツールの `dev_tools.build_footer()` 相当）。
+
+        **バージョンは必ず目に見えるところに出す。** 実機が手元に無いので、
+        「更新が届いたか」を確かめる手段がこの表示しかない。
+        """
+        from . import dev_tools
+
+        version = QtWidgets.QLabel("%s  v%s" % (_PACKAGE, __version__))
+        version.setStyleSheet("color: %s; font-size: 10px;" % (COLORS["text_dim"],))
+        update = QtWidgets.QPushButton("GitHub から更新")
+        update.setToolTip("GitHub の最新版を取得して開き直します。"
+                          "入っているツールは全部まとめて更新されます"
+                          "（Maya の再起動は不要）")
+        update.clicked.connect(lambda *_: dev_tools.update_from_github())
+        self.statusBar().addPermanentWidget(version)
+        self.statusBar().addPermanentWidget(update)
 
     # ── イベント ────────────────────────────────────────────
 
@@ -1024,23 +1049,36 @@ class ConstraintInspectorUI(QtWidgets.QMainWindow):
 _window_instance = None
 
 
+def _close_existing(parent):
+    """開いているウィンドウを閉じる。
+
+    モジュール変数だけに頼らず objectName でも探す。 ハブの更新は
+    `sys.modules` を落とすので、更新前に開いたウィンドウはモジュール変数から
+    辿れなくなる（放っておくと古いコードのウィンドウが残る）。
+    """
+    global _window_instance
+    stale = list(parent.findChildren(QtWidgets.QWidget, WINDOW)) if parent else []
+    if _window_instance is not None:
+        stale.append(_window_instance)
+    for widget in stale:
+        try:
+            widget.close()
+            widget.deleteLater()
+        except Exception:
+            pass
+    _window_instance = None
+
+
 def show():
     global _window_instance
-    try:
-        _window_instance.close()
-        _window_instance.deleteLater()
-    except Exception:
-        pass
-
     parent = get_maya_main_window()
+    _close_existing(parent)
+
     _window_instance = ConstraintInspectorUI(parent=parent)
+    _window_instance.setObjectName(WINDOW)
     _window_instance.show()
     _window_instance.raise_()
     return _window_instance
 
-
-if __name__ == "__main__":
-    show()
-
-# import / importlib.reload どちらでも即起動
-show()
+# 単体スクリプト時代は import しただけで開いていたが、パッケージにしたので
+# やめた。 シェルフボタンは import と show() を別に呼ぶので、残すと 2 回開く
