@@ -38,7 +38,7 @@ _SKIP_OUT_TYPES = ("step", "stepnext")
 
 _END_LABELS = (("Flat", core.END_FLAT), ("Natural", core.END_NATURAL))
 _METHOD_LABELS = (("Smooth", core.METHOD_SMOOTH),
-                  ("Tangent", core.METHOD_TANGENT),
+                  ("Local", core.METHOD_LOCAL),
                   ("Strict", core.METHOD_STRICT))
 
 _CTRL = {}   # コントロール名の控え。 show() のたびに作り直す
@@ -423,14 +423,14 @@ def _build_body():
 
     cmds.separator(h=4, style="none")
     cmds.text(l="キーを選択（無ければオブジェクトを選択）して Fix。\n"
-                "中間キーは前後のキーを通る曲線の接線に、極値はフラットにする。",
+                "キーの前後で曲率までなめらかにつなぎ、極値はフラットにする。",
               align="left")
     _CTRL["method"] = cmds.radioButtonGrp(
         label="Method", labelArray3=[l for l, _ in _METHOD_LABELS],
         numberOfRadioButtons=3, select=method_index, cw4=(70, 70, 70, 70),
         changeCommand=_on_method_changed,
-        annotation="Smooth: 接線。はみ出すときだけ抑える / "
-                   "Tangent: 接線そのもの（わずかにはみ出し得る） / "
+        annotation="Smooth: キーの前後で曲率までつなぐ（はみ出し無し） / "
+                   "Local: 前後のキーの放物線の接線（v0.2） / "
                    "Strict: 強く抑える（v0.1.0）")
     _CTRL["end"] = cmds.radioButtonGrp(
         label="End Keys", labelArray2=[l for l, _ in _END_LABELS],

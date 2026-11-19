@@ -16,16 +16,16 @@ Maya の非ウェイトタンジェントはハンドル長が区間の 1/3 固�
   カーブがわずかに歪む
 * **Spline**: 左右の平均傾きをそのまま使うので、キーに無いオーバーシュートが出る
 
-各キーの傾きは**前後のキーを通る放物線の接線**を基本にする
-（Steffen 法, 1990 と同じ出発点）。 性質:
+既定（`smooth`）の性質:
 
-1. **接線になる** — 中間キーのタンジェントは、前後のキーを滑らかに通る
-   曲線のその点での接線。 キー間隔の不均一も重みで考慮する
-2. **極値のキーは自動でフラット** — 前後の区間の傾きの符号が変わるキーは 0
-3. **はみ出さない（`smooth` / `strict`）** — 接線が区間の傾きの 3 倍
-   （`strict` は 2 倍）を超えるときだけ頭打ちにする。 Fritsch–Carlson の
-   十分条件で、両端キーの値の範囲から曲線が出ない
-4. **C1 連続** — 入出力の傾きを同じにするので、キー位置で折れない
+1. **曲率までつながる（C2）** — キーの前後で傾きだけでなく曲がり方も
+   一致させる（3 次スプラインの連立方程式を解く）。 傾きだけ合わせる
+   （C1）と、キーの前後で「曲がり方が切り替わる」のが目に見える
+2. **極値のキーは自動でフラット** — 前後の区間の傾きの符号が変わるキーは 0。
+   スプラインは極値で区切った区間ごとに解く
+3. **はみ出さない** — 区間の傾きの 3 倍を超えるときだけ頭打ちにする
+   （Fritsch–Carlson の十分条件で、両端キーの値の範囲から曲線が出ない）。
+   頭打ちが効いたキーだけは曲率の連続を諦める
 """
 
 from __future__ import annotations
@@ -130,13 +130,90 @@ def _natural_end_slope(s_near, s_far, h_near, h_far, limit):
     return p
 
 
-METHOD_SMOOTH = "smooth"     # 接線を優先し、はみ出す分だけ頭打ち（既定）
-METHOD_TANGENT = "tangent"   # 接線そのもの。 極値だけ水平（わずかにはみ出し得る）
+METHOD_SMOOTH = "smooth"     # 曲率までつなぐ（C2 スプライン）+ はみ出し防止（既定）
+METHOD_LOCAL = "local"       # 前後のキーの放物線の接線 + はみ出し防止（v0.2 の smooth）
 METHOD_STRICT = "strict"     # Steffen 法の原式（v0.1.0 の挙動）
-METHODS = (METHOD_SMOOTH, METHOD_TANGENT, METHOD_STRICT)
+METHODS = (METHOD_SMOOTH, METHOD_LOCAL, METHOD_STRICT)
 
-_METHOD_LIMIT = {METHOD_SMOOTH: _LIMIT_SMOOTH, METHOD_TANGENT: None,
+_METHOD_LIMIT = {METHOD_SMOOTH: _LIMIT_SMOOTH, METHOD_LOCAL: _LIMIT_SMOOTH,
                  METHOD_STRICT: _LIMIT_STRICT}
+
+
+def _solve_tridiagonal(sub, diag, sup, rhs):
+    """三重対角の連立方程式（Thomas 法）。 対角優位なので枢軸選択は要らない。"""
+    n = len(diag)
+    c = [0.0] * n
+    d = [0.0] * n
+    c[0] = sup[0] / diag[0] if n > 1 else 0.0
+    d[0] = rhs[0] / diag[0]
+    for i in range(1, n):
+        denom = diag[i] - sub[i] * c[i - 1]
+        c[i] = sup[i] / denom if i < n - 1 else 0.0
+        d[i] = (rhs[i] - sub[i] * d[i - 1]) / denom
+    x = [0.0] * n
+    x[-1] = d[-1]
+    for i in range(n - 2, -1, -1):
+        x[i] = d[i] - c[i] * x[i + 1]
+    return x
+
+
+def _spline_slopes(s, h, fixed, end_mode):
+    """曲率（2 階微分）がキーの前後で一致する傾き（C2 の 3 次スプライン）。
+
+    `fixed` は傾きを決め打ちするキー（極値の 0 など）の `{index: slope}`。
+    決め打ちのキーで区切られた区間ごとに、内側のキーは
+
+        h_i m_{i-1} + 2(h_{i-1} + h_i) m_i + h_{i-1} m_{i+1}
+            = 3 (h_i s_{i-1} + h_{i-1} s_i)
+
+    （左右の区間の 2 階微分が等しい条件）を満たす。 端のキーが決め打ちで
+    なければ（Natural）、端で 2 階微分 0 の条件 `2 m_0 + m_1 = 3 s_0` を使う。
+    """
+    n = len(h) + 1
+    slopes = [fixed.get(i, 0.0) for i in range(n)]
+    i = 0
+    while i < n:
+        if i in fixed:
+            i += 1
+            continue
+        run = []
+        while i < n and i not in fixed:
+            run.append(i)
+            i += 1
+        sub, diag, sup, rhs = [], [], [], []
+        for k in run:
+            if k == 0:
+                a, b, c, r = 0.0, 2.0, 1.0, 3.0 * s[0]
+            elif k == n - 1:
+                a, b, c, r = 1.0, 2.0, 0.0, 3.0 * s[-1]
+            else:
+                a = h[k]
+                b = 2.0 * (h[k - 1] + h[k])
+                c = h[k - 1]
+                r = 3.0 * (h[k] * s[k - 1] + h[k - 1] * s[k])
+            # 決め打ちの隣は右辺へ移す
+            if k - 1 >= 0 and (k - 1) in fixed:
+                r -= a * fixed[k - 1]
+                a = 0.0
+            if k + 1 < n and (k + 1) in fixed:
+                r -= c * fixed[k + 1]
+                c = 0.0
+            sub.append(a)
+            diag.append(b)
+            sup.append(c)
+            rhs.append(r)
+        for k, m in zip(run, _solve_tridiagonal(sub, diag, sup, rhs)):
+            slopes[k] = m
+    return slopes
+
+
+def _guard(m, s_prev, s_next, limit):
+    """はみ出し防止。 隣の区間と逆向きなら 0、`limit` 倍を超えたら頭打ち。"""
+    for s in (s_prev, s_next):
+        if s is not None and m * s < 0.0:
+            return 0.0
+    bounds = [abs(s) for s in (s_prev, s_next) if s is not None]
+    return _clamp(m, min(bounds), min(bounds), limit)
 
 
 def compute_slopes(times, values, end_mode=END_FLAT, method=METHOD_SMOOTH,
@@ -147,16 +224,15 @@ def compute_slopes(times, values, end_mode=END_FLAT, method=METHOD_SMOOTH,
     単位は `times` と `values` の単位そのまま（フレームを渡せば 値/フレーム）。
 
     method:
-        * `smooth`  — 前後のキーを通る放物線の接線。 区間の傾きの 3 倍を
-          超えるとはみ出すので、そのときだけ頭打ち（はみ出し 0 を保証）
-        * `tangent` — 放物線の接線そのもの。 極値だけ水平。 隣のキーとの
-          傾きの差が大きい箇所ではわずかにはみ出すことがある
-        * `strict`  — Steffen 法の原式（2 倍で頭打ち。 v0.1.0 の挙動）
+        * `smooth` — キーの前後で**曲率まで**つながる傾き（C2 スプライン）。
+          極値のキーは水平に決め打ちし、その間ごとに解く。 区間の傾きの
+          3 倍を超える箇所だけ頭打ち（はみ出し 0 を保証）
+        * `local`  — 前後のキーを通る放物線の接線（v0.2 の smooth）。
+          傾きは連続だが、キーの前後で曲がり方が変わることがある
+        * `strict` — Steffen 法の原式（2 倍で頭打ち。 v0.1.0 の挙動）
 
     >>> compute_slopes([0, 10, 20], [0, 10, 0])    # 山の頂点はフラット
     [0.0, 0.0, 0.0]
-    >>> compute_slopes([0, 10, 20], [0, 5, 10])    # 直線上なら直線の傾き
-    [0.0, 0.5, 0.0]
     """
     if end_mode not in END_MODES:
         raise ValueError("end_mode は %r のどれか: %r" % (END_MODES, end_mode))
@@ -171,6 +247,25 @@ def compute_slopes(times, values, end_mode=END_FLAT, method=METHOD_SMOOTH,
     s = segment_slopes(times, values, epsilon)
     h = [float(times[i + 1]) - float(times[i]) for i in range(n - 1)]
 
+    if method == METHOD_SMOOTH:
+        fixed = {}
+        for i in range(1, n - 1):
+            if s[i - 1] * s[i] <= 0.0:          # 極値・平ら
+                fixed[i] = 0.0
+        if end_mode == END_FLAT:
+            fixed[0] = 0.0
+            fixed[n - 1] = 0.0
+        raw = _spline_slopes(s, h, fixed, end_mode)
+        slopes = []
+        for i, m in enumerate(raw):
+            if i in fixed:
+                slopes.append(fixed[i])
+                continue
+            s_prev = s[i - 1] if i > 0 else None
+            s_next = s[i] if i < n - 1 else None
+            slopes.append(_guard(m, s_prev, s_next, limit))
+        return [0.0 if abs(m) < epsilon else m for m in slopes]
+
     slopes = [0.0] * n
     for i in range(1, n - 1):
         slopes[i] = _interior_slope(s[i - 1], s[i], h[i - 1], h[i], limit)
@@ -183,6 +278,23 @@ def compute_slopes(times, values, end_mode=END_FLAT, method=METHOD_SMOOTH,
             # 右端は左右を入れ替えた同じ式（向きを反転しても符号は相殺する）
             slopes[-1] = _natural_end_slope(s[-1], s[-2], h[-1], h[-2], limit)
     return [0.0 if abs(m) < epsilon else m for m in slopes]
+
+
+def curvature_jumps(times, values, slopes):
+    """内側の各キーで、左右の区間の 2 階微分（曲がり方）の差を返す。
+
+    0 ならそのキーの前後で曲率までつながっている（C2）。 `smooth` の検証用。
+    """
+    out = []
+    for i in range(1, len(times) - 1):
+        h0 = float(times[i] - times[i - 1])
+        h1 = float(times[i + 1] - times[i])
+        left = (6.0 * (values[i - 1] - values[i]) / (h0 * h0)
+                + (2.0 * slopes[i - 1] + 4.0 * slopes[i]) / h0)
+        right = (6.0 * (values[i + 1] - values[i]) / (h1 * h1)
+                 - (4.0 * slopes[i] + 2.0 * slopes[i + 1]) / h1)
+        out.append(right - left)
+    return out
 
 # --------------------------------------------------------------------------- #
 # 検算（テストと調査関数で使う）

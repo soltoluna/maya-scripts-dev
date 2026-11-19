@@ -212,11 +212,11 @@ class FixFlowCase(unittest.TestCase):
         curve = _FakeCurve([0, 10, 20], [0.0, 0.5, 10.0], selected=[1])
         scene = _FakeScene({"c1": curve})
         with scene.patch():
-            summary = self.module.fix(method=core.METHOD_TANGENT)
+            summary = self.module.fix(method=core.METHOD_LOCAL)
         self.assertAlmostEqual(
             curve.oa[1],
-            self._expected(curve, 24.0, method=core.METHOD_TANGENT)[1])
-        self.assertIn("tangent", summary)
+            self._expected(curve, 24.0, method=core.METHOD_LOCAL)[1])
+        self.assertIn("local", summary)
 
     def test_stepped_keys_are_left_alone(self):
         curve = _FakeCurve([0, 10, 20, 30], [0.0, 5.0, 8.0, 10.0],

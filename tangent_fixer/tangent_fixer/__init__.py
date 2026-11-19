@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 # 先に定義する（サブモジュールが `from . import __version__` で参照するため）
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 # シェルフボタンに出す短い名前（10 文字以内）。 ハブ `install.py` がここを読んで
 # ボタンを貼る。 **表示名であってツール名ではない**ので接頭辞は付けない
@@ -53,7 +53,7 @@ def fix(end_mode=None, method=None):
     """選択キー（無ければ選択オブジェクトの全キー）のタンジェントを直す。
 
     `end_mode` は `"flat"` / `"natural"`、`method` は `"smooth"` /
-    `"tangent"` / `"strict"`。 省略するとウィンドウで最後に選んだ値。
+    `"local"` / `"strict"`。 省略するとウィンドウで最後に選んだ値。
     ホットキーに登録する用。
     """
     return ui.fix(end_mode=end_mode, method=method)
